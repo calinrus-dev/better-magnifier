@@ -1,0 +1,46 @@
+name: Build and test
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Prepare Windhawk 1.7.3 compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'windhawk_setup_offline.exe'
+          $target = Join-Path $env:RUNNER_TEMP 'windhawk'
+          Invoke-WebRequest 'https://github.com/ramensoftware/windhawk/releases/download/v1.7.3/windhawk_setup_offline.exe' -OutFile $installer
+          $expected = '4d93016570f982326eebdfc9068e924ff21f6448534ea32672bb4c1d52a8193b'
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'Windhawk installer checksum mismatch'
+          }
+          $install = Start-Process -FilePath $installer -ArgumentList @('/S', '/PORTABLE', "/D=$target") -WindowStyle Hidden -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Windhawk extraction failed: $($install.ExitCode)" }
+      - name: Test recognizer and compile mod
+        shell: pwsh
+        run: ./scripts/check.ps1 -WindhawkPath (Join-Path $env:RUNNER_TEMP 'windhawk')
+      - name: Upload build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kde-pinch-zoom-windows-x64
+          path: |
+            build/kde-pinch-zoom.dll
+            build/pinch-zoom-host.exe
+            build/core-tests.exe
+            mods/kde-pinch-zoom.wh.cpp
+            README.md
+            LICENSE
+            THIRD_PARTY.md
+            licenses/
+            docs/VALIDATION.md
