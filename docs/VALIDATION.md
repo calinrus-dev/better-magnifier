@@ -1,6 +1,23 @@
-# Validación de 0.1.0
+# Validación
 
 Fecha: 7 de noviembre de 2026.
+
+## Estado de 0.2.0
+
+- 37 pruebas del reconocedor y del estado de filtrado, incluidos inicio sin salto, punto de zoom fijo y supresión de un gesto de multitarea cuando se clasifica como pellizco.
+- 12 comprobaciones del runtime y de las exportaciones ABI del mod.
+- Windows confirma que `TouchpadGesturesController.IsSupported` es verdadero en esta máquina.
+- Los símbolos públicos de Microsoft y el desensamblado de la versión instalada confirman las firmas usadas por los cuatro hooks. El contexto de `StartSwipe` se pasa como un valor de 8 bytes en x64.
+- El filtro nativo se ha instalado y cargado en Explorer; la memoria de estado devuelve `Native gate: READY` y el PID correcto del shell.
+- Se ha recibido una llamada al hook nativo con tres contactos y se ha reenviado por el camino original de Windows.
+- Durante una captura de 0.2, el lector recibió 585 informes, ensambló 196 fotogramas y reconoció un pellizco sin errores de decodificación.
+- La ejecución permanente del hilo integrado en Explorer y la sensación de uso de la versión final siguen pendientes de confirmación.
+
+Una prueba adicional de la API de ampliación se detuvo al detectar otra ampliación activa. El instalador cierra la Lupa anterior de esta sesión y restaura el 100 % antes de activar el mod.
+
+## Historial de 0.1
+
+La prueba física reconoció 6 pellizcos y 2 deslizamientos en 1.505 fotogramas. El usuario informó de conflictos con la multitarea, retraso y mala sensación de seguimiento. Esta versión no cumple el objetivo; las pruebas sintéticas que pasaba no cubrían la convivencia real con Windows.
 
 ## Verificado automáticamente
 
@@ -32,4 +49,4 @@ Fecha: 7 de noviembre de 2026.
 
 No se debe interpretar una compilación correcta ni una prueba sintética como demostración de estas condiciones.
 
-La interfaz de Windhawk se abrió durante la comprobación, pero los controles no respondieron a la automatización. No se considera instalado ni activado el mod; hay instrucciones para importarlo manualmente.
+La interfaz de Windhawk se abrió durante la comprobación, pero los controles no respondieron a la automatización. La versión 0.2 se instaló posteriormente mediante el script local elevado; el registro de este hecho no implica que la calidad de uso ya esté validada.

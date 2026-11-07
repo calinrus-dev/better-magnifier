@@ -37,15 +37,16 @@ int main() {
         r.update(fingers(), 0, 1, config);
         auto result = r.update(fingers(1.1), 16, 1, config);
         require(result.began && result.zoom.has_value(), "pinch not activated");
-        near(*result.zoom, std::pow(1.1, 1.5));
+        near(*result.zoom, 1);  // Crossing the threshold must not jump the view.
         result = r.update(fingers(1.25), 32, *result.zoom, config);
         require(!result.began, "pinch began twice");
-        near(*result.zoom, std::pow(1.25, 1.5));
+        near(*result.zoom, 1.25 / 1.1);
     });
     test("contracting zooms out from current magnification", [] {
         pinch::Recognizer r;
         r.update(fingers(), 0, 2, config);
-        near(*r.update(fingers(0.85), 16, 2, config).zoom, 2 * std::pow(0.85, 1.5));
+        near(*r.update(fingers(0.9), 16, 2, config).zoom, 2);
+        near(*r.update(fingers(0.8), 32, 2, config).zoom, 2 * 0.8 / 0.9);
     });
     test("zoom is bounded at 100 percent", [] {
         pinch::Recognizer r;
@@ -55,7 +56,8 @@ int main() {
     test("zoom respects configured maximum", [] {
         pinch::Recognizer r;
         r.update(fingers(), 0, 3.9, config);
-        near(*r.update(fingers(1.2), 16, 3.9, config).zoom, 4);
+        r.update(fingers(1.1), 16, 3.9, config);
+        near(*r.update(fingers(1.2), 32, 3.9, config).zoom, 4);
     });
     test("horizontal swipe does not produce zoom", [] {
         pinch::Recognizer r;
@@ -150,7 +152,7 @@ int main() {
         pinch::Recognizer r;
         r.update(fingers(), 0, 2, config);
         r.update(fingers(1.2), 16, 2, config);
-        near(*r.update(fingers(0.9), 32, 2, config).zoom, 2 * std::pow(0.9, 1.5));
+        near(*r.update(fingers(0.9), 32, 2, config).zoom, 2 * 0.9 / 1.2);
     });
     test("parallel HID frame ignores padding slots", [] {
         pinch::FrameAssembler a;
@@ -219,6 +221,40 @@ int main() {
     test("negative monitor origins produce negative magnifier offsets", [] {
         const auto view = pinch::viewAt(2, {-960, -540}, {-1920, -1080, 3840, 2160});
         require(view.x == -480 && view.y == -270, "negative virtual origin was lost");
+    });
+    test("a fixed content point stays under the same display point throughout a pinch", [] {
+        const pinch::Desktop desktop{0, 0, 1920, 1080};
+        const auto anchor = pinch::anchorAt({1, 0, 0}, {720, 420});
+        for (const double scale : {1.1, 1.5, 2.0, 3.0, 1.2}) {
+            const auto view = pinch::anchoredView(scale, anchor, desktop);
+            near((anchor.content.x - view.x) * scale, anchor.display.x, 1.6);
+            near((anchor.content.y - view.y) * scale, anchor.display.y, 1.6);
+        }
+    });
+    test("starting another pinch from an existing zoom does not recenter the viewport", [] {
+        const pinch::View original{2, 400, 200};
+        const auto anchor = pinch::anchorAt(original, {700, 400});
+        const auto view = pinch::anchoredView(2, anchor, {0, 0, 1920, 1080});
+        require(view.x == original.x && view.y == original.y, "viewport jumped when a pinch started");
+    });
+    test("native swipe gate holds an undecided gesture until classification", [] {
+        pinch::GestureGate gate;
+        require(gate.update(pinch::Phase::Pending) == pinch::GateMode::Pending, "native swipe started too early");
+        require(gate.update(pinch::Phase::Pinch) == pinch::GateMode::Suppress, "pinch did not suppress swipe");
+    });
+    test("a pinch cannot later activate native multitasking", [] {
+        pinch::GestureGate gate(pinch::Phase::Pinch);
+        require(gate.update(pinch::Phase::Swipe) == pinch::GateMode::Suppress, "pinch changed into native swipe");
+        require(gate.finish(pinch::Phase::Idle) == pinch::GateMode::Suppress, "finger lift activated native swipe");
+    });
+    test("native swipes remain forwarded after recognition", [] {
+        pinch::GestureGate gate;
+        require(gate.update(pinch::Phase::Swipe) == pinch::GateMode::Forward, "native swipe blocked");
+        require(gate.update(pinch::Phase::Pinch) == pinch::GateMode::Forward, "native swipe changed mid-gesture");
+    });
+    test("a short undecided native swipe is forwarded on release", [] {
+        pinch::GestureGate gate;
+        require(gate.finish(pinch::Phase::Idle) == pinch::GateMode::Forward, "short native swipe lost");
     });
     std::cout << passed << " tests passed\n";
 }

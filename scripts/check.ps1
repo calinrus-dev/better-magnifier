@@ -18,6 +18,11 @@ $enginePath = Join-Path $WindhawkPath ($engineEntry -replace '^EnginePath=', '')
 $library = Join-Path $enginePath '64\windhawk.lib'
 if (-not (Test-Path -LiteralPath $library)) { throw "Falta la biblioteca x64: $library" }
 New-Item -ItemType Directory -Path $buildPath -Force | Out-Null
+$parseTokens = $null
+$parseErrors = $null
+[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'install-local.ps1'),
+    [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+if ($parseErrors.Count) { throw ($parseErrors | ForEach-Object { $_.Message } | Out-String) }
 
 function Invoke-Compile([string]$Name, [string[]]$Arguments) {
     # Response files preserve C++ string macro quotes even in Windows PowerShell 5.1.
