@@ -11,7 +11,9 @@ Fecha: 7 de noviembre de 2026.
 - El filtro nativo se ha instalado y cargado en Explorer; la memoria de estado devuelve `Native gate: READY` y el PID correcto del shell.
 - Se ha recibido una llamada al hook nativo con tres contactos y se ha reenviado por el camino original de Windows.
 - Durante una captura de 0.2, el lector recibió 585 informes, ensambló 196 fotogramas y reconoció un pellizco sin errores de decodificación.
-- La ejecución permanente del hilo integrado en Explorer y la sensación de uso de la versión final siguen pendientes de confirmación.
+- Se ha verificado la ejecución permanente del hilo integrado en Explorer: `Native gate: READY`, `hostEnabled=1` y señal de vida actualizada. No necesita un host de prueba externo.
+- La compilación de 0.2 y sus comprobaciones también pasan en GitHub Actions, ejecución `42421864166`.
+- La sensación de uso y la supresión del conflicto en los gestos físicos de la versión final siguen pendientes de confirmación del usuario.
 
 Una prueba adicional de la API de ampliación se detuvo al detectar otra ampliación activa. El instalador cierra la Lupa anterior de esta sesión y restaura el 100 % antes de activar el mod.
 
@@ -19,7 +21,7 @@ Una prueba adicional de la API de ampliación se detuvo al detectar otra ampliac
 
 La prueba física reconoció 6 pellizcos y 2 deslizamientos en 1.505 fotogramas. El usuario informó de conflictos con la multitarea, retraso y mala sensación de seguimiento. Esta versión no cumple el objetivo; las pruebas sintéticas que pasaba no cubrían la convivencia real con Windows.
 
-## Verificado automáticamente
+## Verificaciones anteriores del prototipo 0.1
 
 - Compilación x64 con Clang 20.1.3 incluido con Windhawk 1.7.3.
 - Compilación con `-Wall -Wextra -Werror`.
@@ -28,7 +30,7 @@ La prueba física reconoció 6 pellizcos y 2 deslizamientos en 1.505 fotogramas.
 - 12 comprobaciones del runtime: unidades y coordenadas HID, carga del PE sin ejecutar código y exportaciones ABI que utiliza Windhawk.
 - Compilación adicional con el script de compatibilidad del repositorio oficial de mods, usando los metadatos y opciones del archivo distribuible.
 
-## Verificado en la máquina de desarrollo
+## Máquina de desarrollo y comprobaciones iniciales
 
 - Windows 11 25H2, compilación 26200.9711.
 - La enumeración Raw Input identifica un descriptor HID de Precision Touchpad compatible.
@@ -38,8 +40,8 @@ La prueba física reconoció 6 pellizcos y 2 deslizamientos en 1.505 fotogramas.
 
 ## Pendiente de validación manual
 
-- Reconocimiento con movimientos físicos del usuario, con recepción de informes HID durante la captura.
-- Carga del adaptador de tool mod dentro de Windhawk y cambios de ajustes desde su interfaz.
+- Calidad del seguimiento, latencia percibida y ampliación ligada al movimiento de los dedos en 0.2.
+- Cambios de ajustes desde la interfaz de Windhawk.
 - Que un pellizco no active también un deslizamiento nativo de Windows.
 - Cambio de aplicaciones a izquierda/derecha, mostrar escritorio abajo y multitarea arriba con tres dedos, antes y después de usar zoom.
 - Que el zoom de aplicaciones con dos dedos y los gestos de cuatro dedos conserven su comportamiento.
