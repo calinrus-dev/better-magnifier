@@ -99,7 +99,7 @@ try {
         $settings = $key.CreateSubKey('Settings', $true)
         try {
             $defaults = @{enabled=1; observeOnly=0; sensitivity=100; acceleration=35; invertPinch=0; threshold=3;
-                maxZoom=0; keyboardInterop=1; keyboardStep=0; hideMagnifier=1; mouseFollow='edges'; edgeMargin=12;
+                maxZoom=0; keyboardInterop=1; keyboardStep=0; hideMagnifier=1; keepPointerStable=1; mouseFollow='edges'; edgeMargin=12;
                 smoothing=0; fallbackHeight=60; debugLogging=0}
             foreach ($name in $defaults.Keys) {
                 if ($null -eq $settings.GetValue($name, $null)) {

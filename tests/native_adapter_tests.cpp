@@ -10,7 +10,7 @@
 namespace {
 bridge::Record state{};
 long percent = 100;
-int uiCalls = 0, directWrites = 0, persistedWrites = 0;
+int uiCalls = 0, directWrites = 0, persistedWrites = 0, cursorWarps = 0;
 bool simulateReentrantClose = false;
 LRESULT closeResult = 0;
 double lastFloat = 1;
@@ -27,7 +27,8 @@ void apply(void* self, long value) {
     magnifier::option(self, 14, value, true);
 }
 void direct(void*, float value, POINT*) { ++directWrites; lastFloat = value; }
-void command(void* self, int) { magnifier::option(self, 14, percent + 100, true); }
+void command(void* self, int) { magnifier::moveMouse(self, POINT{10, 20}); magnifier::option(self, 14, percent + 100, true); }
+void cursorWarp(void*, POINT) { ++cursorWarps; }
 void deliver(LONG target, LONG sequence) {
     state.requestRevision = state.zoomRevision;
     state.requestedLevel = target;
@@ -49,6 +50,7 @@ int wmain() {
     magnifier::setLevel = apply;
     magnifier::originalChange = direct;
     magnifier::originalZoomCommand = command;
+    magnifier::originalMoveMouse = cursorWarp;
     magnifier::nativeUi.store(reinterpret_cast<void*>(0x1000));
     magnifier::nativeSelf.store(reinterpret_cast<void*>(0x2000));
     state.controlEnabled = 1;
@@ -113,5 +115,33 @@ int wmain() {
     magnifier::stopping.store(true);
     deliver(18000, 12);
     require(uiCalls == 4 && directWrites == 4, "shutdown rejects later native messages");
+    magnifier::stopping.store(false);
+    magnifier::applyingPinch = true;
+    magnifier::moveMouse(nullptr, POINT{10, 20});
+    require(cursorWarps == 1, "synchronous pinch omits Magnifier cursor injection");
+    magnifier::applyingPinch = false;
+    state.enabled = 1;
+    state.down = 1;
+    state.phase = static_cast<LONG>(pinch::Phase::Pinch);
+    state.heartbeat = static_cast<LONG64>(GetTickCount64());
+    magnifier::moveMouse(nullptr, POINT{10, 20});
+    require(cursorWarps == 1, "deferred cursor restoration is omitted while fingers remain down");
+    magnifier::zoomCommand(nullptr, 0x800A);
+    require(cursorWarps == 2, "native keyboard cursor behavior is preserved even while fingers remain down");
+    state.down = 0;
+    magnifier::moveMouse(nullptr, POINT{10, 20});
+    require(cursorWarps == 3, "native cursor behavior resumes after lifting the fingers");
+    state.down = 1;
+    state.phase = static_cast<LONG>(pinch::Phase::Swipe);
+    magnifier::moveMouse(nullptr, POINT{10, 20});
+    require(cursorWarps == 4, "ordinary three-finger swipes are outside pointer protection");
+    state.phase = static_cast<LONG>(pinch::Phase::Pinch);
+    state.heartbeat = 0;
+    magnifier::moveMouse(nullptr, POINT{10, 20});
+    require(cursorWarps == 5, "a stale host cannot block native pointer behavior");
+    state.heartbeat = static_cast<LONG64>(GetTickCount64());
+    magnifier::keepPointerStable.store(false);
+    magnifier::moveMouse(nullptr, POINT{10, 20});
+    require(cursorWarps == 6, "pointer protection can be disabled independently");
     std::cout << checks << " native adapter checks passed; fake backend; desktop unchanged\n";
 }

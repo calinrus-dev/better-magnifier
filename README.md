@@ -4,9 +4,9 @@
 
 Un proyecto de **accesibilidad para Windows**, inspirada en el efecto de zoom de **KWin / KDE Plasma**. Permite ampliar todo el escritorio con un **pellizco de tres dedos**, usando el motor de la Lupa de Windows. Abre los dedos para acercar y ciérralos para alejar. Puedes alternarlo con **Win + «+» / «−»**, también en el teclado numérico.
 
-**0.3.1: prototipo experimental, en revisión.** Se han comunicado tirones, parpadeos y movimientos inesperados del puntero durante el desarrollo. El código se publica para revisión y colaboración; esta versión todavía no se considera estable para uso diario.
+**0.3.2 experimental.** La prueba física en la máquina de desarrollo confirmó zoom fluido, alternancia con el teclado y puntero estable al mantener los tres dedos. La compatibilidad está acotada a la configuración indicada y sigue necesitando pruebas en otros equipos.
 
- Requiere Windows 11 x64, compilación **26200**, y Windhawk **1.7.3**. Los símbolos privados de Windows pueden cambiar con una actualización. El mod conserva la configuración de gestos del touchpad.
+Requiere Windows 11 x64, compilación **26200**, y Windhawk **1.7.3**. Los símbolos privados de Windows pueden cambiar con una actualización. El mod conserva la configuración de gestos del touchpad.
 
 Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantalla con menos cambios entre touchpad y teclado. Proyecto independiente, sin afiliación con KDE o Microsoft.
 
@@ -30,6 +30,7 @@ En la pestaña **Ajustes** del mod:
 - **Pinch activation threshold:** 3 % por defecto.
 - **Maximum zoom:** 0 por defecto, sin un tope adicional al de Windows.
 - **Keyboard zoom increment:** 0 mantiene el paso configurado en Windows. Un valor positivo lo personaliza.
+- **Keep the pointer stationary during a pinch:** activado por defecto. Omite los reajustes sintéticos del cursor que hace la Lupa durante el pellizco, también al mantener los dedos. No bloquea el movimiento real del ratón ni los atajos nativos.
 - **Hide Windows Magnifier window and touch controls:** activado por defecto.
 - **Observe only:** reconoce sin aplicar zoom.
 
@@ -65,7 +66,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 
 Para Windhawk portátil añade `-WindhawkPath 'D:\Herramientas\Windhawk'`. Se generan la DLL, el host de diagnóstico y las pruebas en `build/`. El script no instala ni activa mods, no inicia Windhawk y no cambia el zoom.
 
-La compilación ejecuta 48 pruebas del reconocedor, 21 del runtime/ABI y 20 del adaptador nativo con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
+La compilación ejecuta 48 pruebas del reconocedor, 21 del runtime/ABI y 27 del adaptador nativo con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
 
 ```powershell
 .\build\native-integration.exe --live

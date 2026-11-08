@@ -1,15 +1,15 @@
 # Validación
 
-Fecha de 0.3.1: 8 de noviembre de 2026.
+Fecha de 0.3.2: 8 de noviembre de 2026.
 
-## Estado de 0.3.1
+## Estado de 0.3.2
 
-La ruta por interfaz con porcentajes enteros mostró tirones y desplazamiento del puntero; se desactivó y se restauraron las preferencias de Windows. La revisión posterior conserva el factor decimal en los fotogramas intermedios y usa la interfaz solo para entrar/salir de ampliación. Falta confirmar físicamente esta última ruta. Pasar los tests no acredita por sí solo la fluidez percibida.
+La ruta por interfaz con porcentajes enteros mostró tirones y desplazamiento del puntero; se desactivó y se restauraron las preferencias de Windows. La revisión posterior conserva el factor decimal en los fotogramas intermedios y usa la interfaz solo para entrar/salir de ampliación. El usuario confirmó después que la ruta decimal era fluida y que el seguimiento y la alternancia con teclado funcionaban. Tras la protección añadida en 0.3.2, confirmó que el puntero se mantenía y las ventanas dejaban de saltar al sostener el pellizco. Pasar los tests no acredita por sí solo la fluidez percibida.
 
 - Compilación x64 con Clang 20.1.3 de Windhawk 1.7.3 y `-Wall -Wextra -Werror`.
 - 48 pruebas del reconocedor: aceleración por velocidad, temporización HID, reversión en los límites, cambios de zoom por teclado, clasificación nativa y descarte del recorrido recibido durante el arranque.
 - 21 comprobaciones de runtime/ABI: incluyen adopción de zoom externo, recuperación al 100 %, anclas tras cambios externos y movimiento del puntero durante un pellizco en el modo API.
-- 20 comprobaciones del adaptador nativo con backend simulado: primado único, factores decimales distintos sin cuantización, una única escritura por solicitud, descarte de bases anteriores al primado/teclado, separación de cambios internos y comandos reales, hilo correcto, recuperación y cierre reentrante.
+- 27 comprobaciones del adaptador nativo con backend simulado: primado único, factores decimales distintos sin cuantización, una única escritura por solicitud, descarte de bases anteriores al primado/teclado, separación de cambios internos y comandos reales, hilo correcto, recuperación, cierre reentrante y protección del cursor tanto síncrona como diferida durante el hold. Se verifica que el teclado y los deslizamientos quedan fuera de esa protección.
 - 5 pruebas de integración ejecutadas contra una iteración anterior de la Lupa real instalada: objetivo desde el controlador de pellizco, cambios rápidos, incremento por IPC desde el nivel del pellizco, vuelta al pellizco y recuperación al 100 %. Se comprueba el factor realmente renderizado con `MagGetFullscreenTransform`. El incremento por IPC no es una pulsación física de teclado.
 - Se ha instalado el mod en Explorer y Magnify; ambos auxiliares informan `READY`, con ventana oculta y sin error informado. El mod anterior `magnifier-headless` está desactivado y sigue instalado.
 - Se identificaron los nombres de las opciones en el binario de Magnify: FollowMouse (16), FollowFocus (17), FollowCaret (18), FollowNarrator (19) y FullScreenTrackingMode (29). Se confirmó por desensamblado que el modo 1 centra el ratón. Se retiró el experimento que invocaba directamente el actualizador de opciones tras una regresión. El mod final conserva las preferencias nativas de seguimiento.
@@ -18,10 +18,24 @@ La ruta por interfaz con porcentajes enteros mostró tirones y desplazamiento de
 - El usuario confirmó «Funciona bien» al alternar pellizco, Win+menos numérico y pellizco en la integración nativa anterior a los últimos ajustes de cierre/arranque.
 - Tras informar de reapertura con Win+Esc, se eliminó el reinicio automático. Tras informar de un salto al arrancar desde cerrada, se descartó el movimiento acumulado durante la espera y las solicitudes de una instancia anterior. El usuario confirmó después que Win+Esc permanece cerrado al dejar el touchpad y las teclas sin tocar durante cinco segundos. La latencia física de ese arranque sigue pendiente de confirmación; no se afirma que abrir Magnify sea instantáneo.
 
-## Pendiente en 0.3.1
+## Comprobación física de 0.3.2
 
-- Confirmación física del primer pellizco después de cerrar y de la ruta final de seguimiento.
-- Estabilidad del seguimiento y continuidad del factor de zoom: la ruta decimal revisada requiere confirmación física tras retirar la variante entera.
+El segundo revisor identificó que `Magnifier::MoveMouse(CPoint)` genera entrada de ratón sintética y que existe una restauración diferida. Se omite esta función únicamente durante una actualización de pellizco o mientras el host está vivo, identifica un pellizco y siguen tres contactos apoyados. Una llamada de teclado nativo conserva su comportamiento, incluso con los dedos apoyados. La protección no inyecta entradas para compensar ni modifica las preferencias de seguimiento de Windows.
+
+Fuente y DLL instaladas coinciden por SHA-256 con la compilación local. Los dos auxiliares están `READY`. La confirmación del usuario cubre esta máquina, no todas las variantes de hardware.
+
+## Consumo observado
+
+Muestra pasiva de 5,05 segundos con la ruta decimal cargada: Explorer consumió 0,31 % de un núcleo y Magnify 0,62 %. El conjunto de trabajo fue 444,6 MiB y 194,8 MiB respectivamente; los handles no crecieron en esa muestra. Son procesos completos, no el coste aislado del mod, y cinco segundos no demuestran ausencia de fugas o estabilidad prolongada.
+
+Una prueba visible anterior envió 300 objetivos con cero timeouts, pero pertenecía a una iteración retirada. Su sondeo estaba limitado por la granularidad de Sleep, por lo que no se presenta como latencia física ni como rendimiento de la versión final. No se repitieron oscilaciones automáticas después de la queja del usuario.
+
+Muestra pasiva de 0.3.2 durante 5,05 segundos: Explorer 1,55 % de un núcleo y Magnify 0 % en la resolución de la muestra; ambos sin crecimiento de memoria privada. Conjuntos de trabajo: 487,0 y 194,8 MiB. La actividad del escritorio explica que estas muestras no sean comparaciones aisladas del coste del mod.
+
+## Pendiente en 0.3.2
+
+- Pruebas prolongadas y repetidas de arranque en frío, mantener los dedos y seguimiento en otros equipos.
+- Generalizar las comprobaciones físicas a otros dispositivos y condiciones; las confirmaciones actuales corresponden a esta máquina.
 - Cambios de ajustes desde la interfaz de Windhawk, incluida la ocultación reversible.
 - Los cuatro deslizamientos nativos, gestos de dos/cuatro dedos, bloqueo y suspensión en la versión final.
 - Monitores con DPI distintos y aplicaciones elevadas.

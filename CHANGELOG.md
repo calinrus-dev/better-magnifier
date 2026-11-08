@@ -1,5 +1,13 @@
 # Cambios
 
+## 0.3.2 — 2026-11-08 (experimental)
+
+- Protección configurable del puntero, activada por defecto: evita los movimientos sintéticos de la Lupa durante el pellizco y mientras se mantienen tres dedos apoyados.
+- Conserva el movimiento real del ratón, el comportamiento del teclado nativo y los deslizamientos normales.
+- El diagnóstico informa del número de reajustes omitidos y de su origen, sin guardar coordenadas de los dedos.
+- 27 pruebas del adaptador nativo, además de las 48 del núcleo y 21 de runtime/ABI: 96 en total.
+- El usuario confirmó la fluidez de la ruta decimal y, después, que el puntero se mantenía estable y las ventanas dejaban de saltar al sostener el pellizco.
+
 ## 0.3.1 — 2026-11-08 (experimental)
 
 Pendiente: fluidez en hardware y movimientos inesperados del puntero. Esta iteración no se considera estable.

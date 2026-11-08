@@ -4,7 +4,7 @@
 // @name:es-ES      Zoom accesible inspirado en KWin
 // @description     KWin-inspired accessibility: three-finger pinch for native Windows Magnifier
 // @description:es-ES Accesibilidad inspirada en KWin: pellizco de tres dedos para la Lupa nativa de Windows
-// @version         0.3.1
+// @version         0.3.2
 // @author          calinrus-dev
 // @github          https://github.com/calinrus-dev
 // @homepage        https://github.com/calinrus-dev/windhawk-kde-pinch-zoom
@@ -71,6 +71,9 @@ https://github.com/calinrus-dev/windhawk-kde-pinch-zoom
 - keyboardStep: 0
   $name: Keyboard zoom increment (%)
   $description: 0 keeps the increment configured in Windows Magnifier.
+- keepPointerStable: true
+  $name: Keep the pointer stationary during a pinch
+  $description: Prevents Magnifier's synthetic cursor warps while three-finger pinching. Real mouse movement and native keyboard zoom remain available.
 - hideMagnifier: true
   $name: Hide Windows Magnifier window and touch controls
 - smoothing: 0
@@ -405,8 +408,8 @@ inline double smooth(double current, double target, double elapsed, double durat
 #endif
 
 namespace bridge {
-constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v7";
-constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v7";
+constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v8";
+constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v8";
 struct alignas(8) Record {
     volatile LONG phase;
     volatile LONG down;
@@ -432,6 +435,8 @@ struct alignas(8) Record {
     volatile LONG startAtNormal;
     volatile LONG zoomRevision;
     volatile LONG requestRevision;
+    volatile LONG blockedCursorMoves;
+    volatile LONG lastCursorOrigin;
 };
 class Mapping {
     HANDLE mapping_ = nullptr;
@@ -1431,6 +1436,7 @@ int wmain(int argc, wchar_t** argv) {
         if (inspector.initialize()) std::printf("Windows Magnifier: %s; pid=%ld; hidden=%ld; keyboardCommands=%ld; lastError=%ld; actualZoom=%.2f%%\n",
             mapping.magnifierAvailable() ? "READY" : "NOT LOADED", record->magnifierPid,
             record->hideUi, record->nativeCommands, record->nativeError, inspector.rendered() * 100);
+        std::printf("Pointer protection: blocked=%ld; lastOriginRva=0x%lx; threeFingersDown=%ld\n", record->blockedCursorMoves, static_cast<unsigned long>(record->lastCursorOrigin), record->down);
         return mapping.gateAvailable() ? 0 : 3;
     }
     if (reset) {
@@ -1493,6 +1499,8 @@ using Change = void(*)(void*, float, POINT*);
 using Run = void(*)(void*);
 using SetLevel = void(*)(void*, long);
 using ZoomCommand = void(*)(void*, int);
+using MoveMouse = void(*)(void*, POINT);
+static_assert(sizeof(POINT) == 8, "Native CPoint ABI is an 8-byte value");
 using SetOption = void(*)(void*, int, long, bool);
 using GetOption = long(*)(void*, int);
 using GetKeeper = HRESULT(*)(void**);
@@ -1500,6 +1508,8 @@ Change originalChange = nullptr;
 Run originalRun = nullptr;
 SetLevel setLevel = nullptr;
 ZoomCommand originalZoomCommand = nullptr;
+MoveMouse originalMoveMouse = nullptr;
+std::atomic<bool> keepPointerStable{true};
 std::atomic<void*> nativeUi{nullptr};
 std::atomic<bool> trackingInitialized{false};
 std::atomic<DWORD> rendererThread{0};
@@ -1520,11 +1530,12 @@ HANDLE thread = nullptr;
 std::atomic<HWND> messageWindow{nullptr};
 std::atomic<bool> stopping{false};
 std::atomic<unsigned> activeUpdates{0};
-constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v7";
+constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v8";
 std::atomic<DWORD> uiThread{0};
 std::atomic<void*> nativeSelf{nullptr}; // Dereferenced only on the native rendering thread.
 thread_local bool applyingPinch = false;
-const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v7");
+thread_local unsigned nativeCommandDepth = 0;
+const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v8");
 LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l);
 void publish(float level) {
     if (mapping.get()) InterlockedExchange(&mapping.get()->nativeLevel, static_cast<LONG>(std::lround(level * 10000)));
@@ -1572,6 +1583,31 @@ long readOption(void* self, int name) {
         return mapping.get()->keyboardStep;
     return getOption(self, name);
 }
+bool holdPointer() {
+    if (!keepPointerStable.load() || stopping.load() || nativeCommandDepth) return false;
+    if (applyingPinch) return true;
+    auto* state = mapping.get();
+    return state && state->enabled && state->controlEnabled && state->down &&
+        state->phase == static_cast<LONG>(pinch::Phase::Pinch) &&
+        GetTickCount64() - static_cast<ULONGLONG>(InterlockedCompareExchange64(&state->heartbeat, 0, 0)) < 250;
+}
+void moveMouse(void* self, POINT point) {
+    if (holdPointer()) {
+        if (auto* state = mapping.get()) {
+            InterlockedIncrement(&state->blockedCursorMoves);
+            const auto address = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+            const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+            InterlockedExchange(&state->lastCursorOrigin, address >= base && address - base <= MAXLONG ? static_cast<LONG>(address - base) : 0);
+        }
+        return; // Hardware mouse input is untouched; only Magnifier's own warp is omitted.
+    }
+    originalMoveMouse(self, point);
+}
+struct NativeCommandScope {
+    bool previous = applyingPinch;
+    NativeCommandScope() { ++nativeCommandDepth; applyingPinch = false; }
+    ~NativeCommandScope() { applyingPinch = previous; --nativeCommandDepth; }
+};
 void nativeCommandComplete(void*) {
     if (applyingPinch) return;
     void* keeper = nullptr;
@@ -1583,10 +1619,12 @@ void nativeCommandComplete(void*) {
     trackingInitialized.store(mapping.get()->nativeLevel > 10000);
 }
 void uiLevel(void* self, long level) {
+    NativeCommandScope scope;
     setLevel(self, level);
     nativeCommandComplete(self);
 }
 void zoomCommand(void* self, int command) {
+    NativeCommandScope scope;
     originalZoomCommand(self, command);
     nativeCommandComplete(self);
 }
@@ -1753,7 +1791,8 @@ DWORD WINAPI worker(void*) {
 bool initialize() {
     if (!mapping.open()) return false;
     hiding.store(Wh_GetIntSetting(L"hideMagnifier") != 0);
-    void* targets[7]{};
+    keepPointerStable.store(Wh_GetIntSetting(L"keepPointerStable") != 0);
+    void* targets[8]{};
     WH_FIND_SYMBOL symbol{};
     const HANDLE search = Wh_FindFirstSymbol(GetModuleHandleW(nullptr), nullptr, &symbol);
     if (!search) return false;
@@ -1765,6 +1804,7 @@ bool initialize() {
         if (wcsstr(symbol.symbol, L"MagnifierUI::Run(")) targets[4] = symbol.address;
         if (wcsstr(symbol.symbol, L"MagnifierUI::HandleSetZoomLevel(")) targets[5] = symbol.address;
         if (wcsstr(symbol.symbol, L"MagnifierUI::HandleZoomCommand(")) targets[6] = symbol.address;
+        if (wcsstr(symbol.symbol, L" Magnifier::MoveMouse(")) targets[7] = symbol.address;
         if (std::all_of(std::begin(targets), std::end(targets), [](void* target) { return target != nullptr; })) break;
     } while (Wh_FindNextSymbol(search, &symbol));
     Wh_FindCloseSymbol(search);
@@ -1775,6 +1815,7 @@ bool initialize() {
     return Wh_SetFunctionHook(targets[4], reinterpret_cast<void*>(run), reinterpret_cast<void**>(&originalRun)) &&
         Wh_SetFunctionHook(targets[5], reinterpret_cast<void*>(uiLevel), reinterpret_cast<void**>(&setLevel)) &&
         Wh_SetFunctionHook(targets[6], reinterpret_cast<void*>(zoomCommand), reinterpret_cast<void**>(&originalZoomCommand)) &&
+        Wh_SetFunctionHook(targets[7], reinterpret_cast<void*>(moveMouse), reinterpret_cast<void**>(&originalMoveMouse)) &&
         Wh_SetFunctionHook(targets[0], reinterpret_cast<void*>(change), reinterpret_cast<void**>(&originalChange)) &&
         Wh_SetFunctionHook(targets[1], reinterpret_cast<void*>(option), reinterpret_cast<void**>(&originalOption)) &&
         Wh_SetFunctionHook(targets[2], reinterpret_cast<void*>(readOption), reinterpret_cast<void**>(&getOption)) &&
@@ -2076,6 +2117,7 @@ BOOL Wh_ModSettingsChanged(BOOL* reload) {
     *reload = FALSE;
     if (magnifier::role) {
         magnifier::hiding.store(Wh_GetIntSetting(L"hideMagnifier") != 0);
+        magnifier::keepPointerStable.store(Wh_GetIntSetting(L"keepPointerStable") != 0);
         EnumWindows(magnifier::visibility, 0);
         return TRUE;
     }
