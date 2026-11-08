@@ -2,6 +2,17 @@
 
 Fecha de revisión: 8 de noviembre de 2026.
 
+## Estado de 0.6.1
+
+- 277 comprobaciones sin teclas, clics ni zoom sintéticos sobre el escritorio: las 235 de la base y 42 específicas del teclado mantenido.
+- Primer toque nativo, aceleración de repeticiones ×2, botones de UI, ambos Win, OEM y numérico, VK de layout transportado por WM_HOTKEY y timestamps de 32 bits con vigencia acotada mediante reloj de 64 bits.
+- Suelta antes de una repetición en cola, factor/posición visibles, reactivación del tracker si el objetivo llegó al 100 % mientras la vista aún está ampliada, y cancelación por entradas nuevas o cambios de sesión/vista.
+- Fallo de timer, capacidades ausentes, cierre/reentrancia, lector que cambia la revisión o cancela, estado de UI/renderizador y drenaje de activeUpdates. La congelación no escribe una transformación propia de API.
+- Se conserva la cadencia nativa: el binario actual limita hotkeys repetidos del mismo identificador a unos 125 ms; el cambio aumenta el paso, no la velocidad global del teclado. La detección de suelta ocurre en el siguiente turno UI, aproximadamente un frame; no se promete latencia física cero.
+- Instalada y comprobada por hash. La captura pasiva de 45 segundos no registró pulsaciones de las teclas observadas; no demuestra el resultado físico de la función nueva.
+
+Pendiente: confirmación física de mantener/soltar, seguimiento y alternancia con rueda/pellizco. Las limitaciones de hardware, reinicio y versiones de Windows de la base siguen vigentes.
+
 ## Estado de 0.6.0
 
 - 75 pruebas del núcleo, 53 del runtime/ABI, 68 del adaptador nativo, 25 del shell y 14 del lanzamiento público: 235 comprobaciones sin zoom ni teclas/clics sintéticos.

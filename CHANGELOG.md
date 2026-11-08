@@ -1,5 +1,12 @@
 # Cambios
 
+## 0.6.1 — 2026-11-08 (experimental)
+
+- Mantener Win+«+»/«−» aplica ×2 a las repeticiones, configurable de 1 a 4, incluidos OEM y teclado numérico. El primer toque, los botones de la Lupa y la repetición global del teclado conservan su comportamiento.
+- Al soltar fija el factor decimal y la posición que Windows estaba renderizando, descartando repeticiones antiguas. Una entrada nueva de rueda/pellizco o reset cancela el seguimiento sin sobrescribir su resultado.
+- El cambio exige capacidades verificadas y ofrece comportamiento nativo si faltan. La pausa del mod desactiva también la aceleración.
+- 277 comprobaciones automáticas, incluidas 42 específicas nuevas. Instalada localmente; validación física de la nueva función pendiente.
+
 ## 0.6.0 — 2026-11-08 (experimental)
 
 - Sensibilidad predeterminada de rueda al 20 %, primer paso decimal fino y control configurable de velocidad para ruedas libres. Acumulador acotado por revisión; caducidad de 200 ms sin cola de mensajes por delta.

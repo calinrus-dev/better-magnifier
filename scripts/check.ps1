@@ -70,6 +70,10 @@ $feedbackTest = Join-Path $buildPath 'launch-feedback-tests.exe'
 Invoke-Compile 'launch-feedback-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\launch_feedback_tests.cpp'), '-o', $feedbackTest) + $links)
 & $feedbackTest
 if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas de inicio sin feedback ($LASTEXITCODE)." }
+$holdTest = Join-Path $buildPath 'keyboard-hold-tests.exe'
+Invoke-Compile 'keyboard-hold-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\keyboard_hold_tests.cpp'), '-o', $holdTest) + $links)
+& $holdTest
+if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas de teclado mantenido ($LASTEXITCODE)." }
 Invoke-Compile 'native-integration' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_integration.cpp'),
     '-o', (Join-Path $buildPath 'native-integration.exe')) + $links)
 Invoke-Compile 'native-performance' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_performance.cpp'),

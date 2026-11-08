@@ -4,7 +4,7 @@
 
 Un proyecto de **accesibilidad para Windows**, inspirado en el efecto de zoom de **KWin / KDE Plasma**. Permite ampliar todo el escritorio con un **pellizco de tres dedos**, usando el motor de la Lupa de Windows. Abre los dedos para acercar y ciérralos para alejar. Puedes alternarlo con **Win + «+» / «−»**, también en el teclado numérico.
 
-**0.6.0 experimental.** Rueda al 20 % por muesca, entrada de rueda libre acotada y primer paso fino desde el 100 %. Corrige estados de gesto cancelado y da prioridad a los atajos nativos. Añade perfiles offline verificados y degradación por capacidades. El usuario confirmó Inicio/Win+S, atajos de Lupa y clics normales, primer paso fino y rueda libre controlada alternando con pellizco.
+**0.6.1 experimental.** Mantener Win+«+»/«−» acelera las repeticiones (×2 por defecto), también en el teclado numérico, y al soltar fija la vista renderizada. El toque corto conserva su paso nativo. La base 0.6.0 fue confirmada por el usuario; la nueva pulsación mantenida está pendiente de confirmación física.
 
 Las funciones avanzadas están validadas en Windows 11 x64, compilación **26200**, con Windhawk **1.7.3**. Una versión o interfaz no verificada conserva los controles estándar de la Lupa; no implica soporte del zoom continuo. El mod conserva la configuración de gestos del touchpad.
 
@@ -41,6 +41,7 @@ En la pestaña **Ajustes** del mod:
 - **Reverse pinch direction:** invierte acercar y alejar.
 - **Pinch activation threshold:** 3 % por defecto.
 - **Maximum zoom:** 0 por defecto, sin un tope adicional al de Windows.
+- **Keyboard hold speed multiplier:** 2 por defecto, ajustable entre 1 y 4. El valor 1 conserva la repetición estándar. Solo modifica repeticiones de Win+«+»/«−»; mantiene el primer paso y la cadencia del teclado configurada en Windows. Al soltar detiene el objetivo pendiente en la vista renderizada, en el siguiente turno del hilo UI.
 - **Keyboard zoom increment:** 0 mantiene el paso configurado en Windows. Un valor positivo lo personaliza.
 - **Switch windows directly with a horizontal three-finger swipe:** activado por defecto; desactívalo para conservar el selector lateral de Windows.
 - **Show Task View and desktop at 100 percent:** activado por defecto; conserva una única instantánea global para restaurarla al salir.
@@ -96,7 +97,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 
 Para Windhawk portátil añade `-WindhawkPath 'D:\Herramientas\Windhawk'`. Se generan la DLL, el host de diagnóstico y las pruebas en `build/`. El script no instala ni activa mods, no inicia Windhawk y no cambia el zoom.
 
-La compilación ejecuta 75 pruebas del núcleo, 53 del runtime/ABI, 68 del adaptador nativo, 25 del filtro de gestos del shell y 14 del lanzamiento público: 235 comprobaciones con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
+La compilación ejecuta 75 pruebas del núcleo, 53 del runtime/ABI, 68 del adaptador nativo, 25 del filtro del shell, 14 del lanzamiento público y 42 del teclado mantenido: 277 comprobaciones con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
 
 ```powershell
 .\build\native-integration.exe --live

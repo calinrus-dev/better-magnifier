@@ -4,7 +4,7 @@
 // @name:es-ES      Better Magnifier
 // @description     KWin-inspired accessibility: smooth pinch and mouse-wheel zoom for native Windows Magnifier
 // @description:es-ES Accesibilidad inspirada en KWin: zoom fluido con pellizco y rueda para la Lupa nativa de Windows
-// @version         0.6.0
+// @version         0.6.1
 // @author          calinrus-dev
 // @github          https://github.com/calinrus-dev
 // @homepage        https://github.com/calinrus-dev/better-magnifier
@@ -83,6 +83,9 @@ https://github.com/calinrus-dev/better-magnifier
 - wheelMaxRate: 400
   $name: Maximum wheel zoom growth per second (%)
   $description: 400 permits up to five times the zoom per second. Bounds free-spin speed without losing small wheel deltas. 50 to 2000.
+- keyboardHoldMultiplier: 2
+  $name: Keyboard hold speed multiplier
+  $description: 1 disables this feature. 2 to 4 increases only held Win plus/minus repeats, including numpad. A single tap keeps native behavior.
 - keyboardStep: 0
   $name: Keyboard zoom increment (%)
   $description: 0 keeps the increment configured in Windows Magnifier.
@@ -253,6 +256,7 @@ struct Config {
     bool instantHorizontalSwitch = true;
     bool normalZoomInOverview = true;
     int keyboardStep = 0;
+    int keyboardHoldMultiplier = 2;
     int mouseFollow = 0;  // edges, proportional, fixed
     double edgeMargin = 0.12;
 };
@@ -545,6 +549,44 @@ inline double smooth(double current, double target, double elapsed, double durat
     return std::abs(result - target) < 0.0005 ? target : result;
 }
 
+// Native key-hold policy. Only real WM_HOTKEY 0/1 sessions use this;
+// buttons, other hotkeys and single short taps retain the original behavior.
+class KeyboardHold {
+    int direction_ = 0, closedDirection_ = 0;
+    bool repeated_ = false, closed_ = false;
+    std::uint32_t closedAt_ = 0;
+    std::uint64_t closedClock_ = 0;
+public:
+    static bool atOrBefore(std::uint32_t value, std::uint32_t cutoff) {
+        return static_cast<std::int32_t>(value - cutoff) <= 0;
+    }
+    bool stale(int direction, std::uint32_t timestamp, std::uint64_t now) const {
+        return closed_ && direction == closedDirection_ && now >= closedClock_ &&
+            now - closedClock_ <= 60000 && atOrBefore(timestamp, closedAt_);
+    }
+    bool active() const { return direction_ != 0; }
+    bool repeated() const { return repeated_; }
+    int direction() const { return direction_; }
+    int command(int direction, bool physicalDown, int multiplier) {
+        if (!physicalDown || multiplier <= 1) return 1;
+        if (direction_ != direction) { direction_ = direction; repeated_ = false; return 1; }
+        repeated_ = true;
+        return std::clamp(multiplier, 1, 4);
+    }
+    // An active session has already delivered its first native command. Seal it
+    // on cancellation too, so a queued first repeat cannot overwrite newer input.
+    // A short tap first delivered after release never opens an active session.
+    bool close(std::uint64_t now, bool seal = true) {
+        const bool freeze = repeated_;
+        if (seal && direction_) {
+            closed_ = true; closedDirection_ = direction_;
+            closedAt_ = static_cast<std::uint32_t>(now); closedClock_ = now;
+        }
+        direction_ = 0; repeated_ = false;
+        return freeze;
+    }
+};
+
 }  // namespace pinch
 
 // Capability planning is pure. Resolving optional symbols never weakens the
@@ -708,8 +750,8 @@ bool resolve(HMODULE module, Kind kind, void** targets, std::size_t count) {
 
 namespace bridge {
 inline volatile LONG* desktopRaised = nullptr;
-constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v11";
-constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v11";
+constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v12";
+constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v12";
 struct alignas(8) Record {
     volatile LONG phase;
     volatile LONG down;
@@ -723,6 +765,9 @@ struct alignas(8) Record {
     volatile LONG controlEnabled;
     volatile LONG hideUi;
     volatile LONG keyboardStep;
+    volatile LONG keyboardHoldMultiplier;
+    volatile LONG keyboardHoldRepeats;
+    volatile LONG keyboardHoldFreezes;
     volatile LONG maxZoomPercent;
     volatile LONG syncRequest;
     volatile LONG nativeCommands;
@@ -830,6 +875,7 @@ public:
         InterlockedExchange(&record_->instantSwitch, config.instantHorizontalSwitch && config.enabled && !config.observeOnly ? 1 : 0);
         InterlockedExchange(&record_->normalInOverview, config.normalZoomInOverview ? 1 : 0);
         InterlockedExchange(&record_->keyboardStep, config.keyboardStep);
+        InterlockedExchange(&record_->keyboardHoldMultiplier, std::clamp(config.keyboardHoldMultiplier, 1, 4));
         InterlockedExchange(&record_->maxZoomPercent, static_cast<LONG>(config.maxZoom * 100));
         if (!config.enabled || config.observeOnly) {
             InterlockedExchange(&record_->appliedSequence, record_->requestedSequence);
@@ -1386,6 +1432,7 @@ class Host {
         auto result = config_;
         result.enabled = result.enabled && sessionActive_;
         result.smoothWheel = result.smoothWheel && !paused_;
+        if (paused_) result.keyboardHoldMultiplier = 1;
         return result;
     }
     void applySessionState() {
@@ -2026,6 +2073,7 @@ int wmain(int argc, wchar_t** argv) {
         std::printf("Pointer protection: blocked=%ld; lastOriginRva=0x%lx; threeFingersDown=%ld\n", record->blockedCursorMoves, static_cast<unsigned long>(record->lastCursorOrigin), record->down);
         std::printf("Compatibility: nativeCaps=0x%lx; gateCaps=0x%lx; nativeReason=%ld; gateReason=%ld\n", record->nativeCaps, record->gateCaps, record->resolverReasonNative, record->resolverReasonGate);
         std::printf("Resolvers: native=%ld; shell=%ld; desktop=%ld (1=offline verified, 2=symbols)\n", record->resolverModeNative, record->resolverModeGate, record->resolverModeDesktop);
+        std::printf("Keyboard hold: multiplier=%ld; acceleratedRepeats=%ld; releaseFreezes=%ld\n", record->keyboardHoldMultiplier, record->keyboardHoldRepeats, record->keyboardHoldFreezes);
         std::printf("Wheel: enabled=%ld; active=%ld; nativeEvents=%ld\n", record->wheelEnabled, record->wheelActive, record->wheelEvents);
         std::printf("Cursor clip protection: blocked=%ld\n", record->blockedCursorClips);
         std::printf("Shell view: mask=%ld; applied=%ld/%ld; pendingGestures=%ld; instantSwitch=%ld; direction=%ld\n", record->shellMask, record->shellApplied, record->shellRevision, record->pendingGestures, record->instantSwitch, record->swipeDirection);
@@ -2139,12 +2187,29 @@ HANDLE thread = nullptr;
 std::atomic<HWND> messageWindow{nullptr};
 std::atomic<bool> stopping{false};
 std::atomic<unsigned> activeUpdates{0};
-constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v11";
+constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v12";
 std::atomic<DWORD> uiThread{0};
 std::atomic<void*> nativeSelf{nullptr}; // Dereferenced only on the native rendering thread.
 thread_local bool applyingPinch = false;
 thread_local unsigned nativeCommandDepth = 0;
-const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v11");
+constexpr UINT_PTR kKeyboardHoldTimer = 0x4b48;
+constexpr UINT kCancelKeyboardHold = WM_APP + 0x61;
+pinch::KeyboardHold keyboardHold;
+LONG keyboardHoldRevision = 0;
+std::uint64_t keyboardHoldGeneration = 0; // Native UI thread only.
+int keyboardHeldVk = 0;
+thread_local int keyboardHotkeyDirection = 0, keyboardStepMultiplier = 1, keyboardHotkeyVk = 0;
+thread_local DWORD keyboardHotkeyTimestamp = 0;
+decltype(&GetAsyncKeyState) keyboardKeyState = GetAsyncKeyState;
+decltype(&GetTickCount64) keyboardClock64 = GetTickCount64;
+decltype(&GetMessageTime) keyboardMessageTime = GetMessageTime;
+decltype(&SetTimer) keyboardSetTimer = SetTimer;
+decltype(&KillTimer) keyboardKillTimer = KillTimer;
+decltype(&PostMessageW) keyboardPostMessage = PostMessageW;
+void cancelKeyboardHold(bool seal = true);
+bool freezeKeyboardHold();
+void pollKeyboardHold();
+const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v12");
 LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l);
 void publish(float level) {
     if (mapping.get()) InterlockedExchange(&mapping.get()->nativeLevel, static_cast<LONG>(std::lround(level * 10000)));
@@ -2196,6 +2261,22 @@ void recoverRenderer(void* self) {
     }
 }
 LRESULT CALLBACK uiWindowProc(HWND window, UINT message, WPARAM w, LPARAM l) {
+    struct HotkeyContext {
+        int previousDirection = keyboardHotkeyDirection;
+        int previousVk = keyboardHotkeyVk;
+        DWORD previousTimestamp = keyboardHotkeyTimestamp;
+        HotkeyContext(UINT message, WPARAM identifier, LPARAM parameters) {
+            keyboardHotkeyDirection = message == WM_HOTKEY && identifier <= 1 ? (identifier == 0 ? 1 : -1) : 0;
+            keyboardHotkeyVk = 0;
+            if (keyboardHotkeyDirection && parameters) {
+                const unsigned modifiers = LOWORD(parameters), vk = HIWORD(parameters);
+                if ((modifiers & MOD_WIN) && vk && vk <= 255) keyboardHotkeyVk = static_cast<int>(vk);
+                else keyboardHotkeyDirection = 0; // Unknown/non-Win signatures stay entirely native.
+            }
+            keyboardHotkeyTimestamp = keyboardHotkeyDirection ? static_cast<DWORD>(keyboardMessageTime()) : 0;
+        }
+        ~HotkeyContext() { keyboardHotkeyDirection = previousDirection; keyboardHotkeyTimestamp = previousTimestamp; keyboardHotkeyVk = previousVk; }
+    } context(message, w, l);
     const LRESULT result = originalUiWindowProc(window, message, w, l);
     if (message == WM_NULL && !stopping.load()) ensureUi(reinterpret_cast<void*>(windowData(window, GWLP_USERDATA)));
     return result;
@@ -2216,6 +2297,7 @@ BOOL CALLBACK wakeExistingTree(HWND window, LPARAM) {
     return TRUE;
 }
 void change(void* self, float level, POINT* point) {
+    if (!applyingPinch && !nativeCommandDepth) cancelKeyboardHold();
     // A native renderer call is itself sufficient evidence of a native command
     // while pinch is inactive, even when HandleZoomCommand is unavailable.
     struct ExternalCommand {
@@ -2250,9 +2332,11 @@ void change(void* self, float level, POINT* point) {
     if (messageWindow && nativeSelf) InterlockedExchange(&mapping.get()->magnifierReady, 1);
 }
 long readOption(void* self, int name) {
-    if (name == 20 && mapping.get() && mapping.get()->keyboardStep > 0)
-        return mapping.get()->keyboardStep;
-    return getOption(self, name);
+    const long value = name == 20 && mapping.get() && mapping.get()->keyboardStep > 0
+        ? mapping.get()->keyboardStep : getOption(self, name);
+    if (name != 20 || keyboardStepMultiplier <= 1) return value;
+    // Native zoom remains additive and retains its own 100..1600% clamp.
+    return static_cast<long>(std::clamp<long long>(static_cast<long long>(value) * keyboardStepMultiplier, 1, 1600));
 }
 bool holdPointer() {
     if (!keepPointerStable.load() || stopping.load() || nativeCommandDepth) return false;
@@ -2310,22 +2394,145 @@ void resumeForNativeCommand() {
     if (!updateOverview()) { overviewSuspended.store(false); overviewView.reset(); }
 }
 void uiLevel(void* self, long level) {
+    if (!nativeCommandDepth) cancelKeyboardHold();
     ensureUi(self);
     resumeForNativeCommand();
     NativeCommandScope scope;
     setLevel(self, level);
     nativeCommandComplete(scope.rendererBefore);
 }
+bool keyboardHoldAvailable() {
+    const auto* state = mapping.get();
+    constexpr auto required = compatibility::NativeCore | compatibility::NativeKeyboardObserver |
+                              compatibility::NativeViewportRestore | compatibility::NativeBootstrapWindows;
+    return state && !stopping.load() && state->controlEnabled && state->magnifierReady &&
+        state->keyboardHoldMultiplier > 1 && (static_cast<unsigned>(state->nativeCaps) & required) == required &&
+        messageWindow && nativeSelf && nativeUi && readTransform && moveTo && originalChange && originalOption && setLevel &&
+        rendererThread.load() == GetCurrentThreadId() && uiThread.load() == GetCurrentThreadId();
+}
+int physicalZoomDirection(int nativeDirection = 0, int nativeVk = 0) {
+    const auto down = [](int key) { return (keyboardKeyState(key) & 0x8000) != 0; };
+    if ((!down(VK_LWIN) && !down(VK_RWIN)) || down(VK_ESCAPE)) return 0;
+    // The native WM_HOTKEY carries the real layout-dependent key. The fixed
+    // keys below are only a fallback for manually posted messages with lParam0.
+    if (nativeDirection && nativeVk) return down(nativeVk) ? nativeDirection : 0;
+    const bool plus = down(VK_OEM_PLUS) || down(VK_ADD);
+    const bool minus = down(VK_OEM_MINUS) || down(VK_SUBTRACT);
+    if (plus == minus) return 0;
+    return plus ? 1 : -1;
+}
+void cancelKeyboardHold(bool seal) {
+    // A future renderer/settings thread must never mutate UI-owned hold state.
+    if (uiThread.load() != GetCurrentThreadId()) {
+        if (const HWND window = messageWindow.load()) keyboardPostMessage(window, kCancelKeyboardHold, seal ? 0 : 1, 0);
+        return;
+    }
+    if (const HWND window = messageWindow.load()) keyboardKillTimer(window, kKeyboardHoldTimer);
+    ++keyboardHoldGeneration;
+    keyboardHold.close(keyboardClock64(), seal);
+    keyboardHeldVk = 0;
+}
+bool freezeKeyboardHold() {
+    auto* state = mapping.get();
+    if (!keyboardHoldAvailable() || !state || state->inputRevision != keyboardHoldRevision || overviewSuspended.load()) return false;
+    const auto expectedSelf = nativeSelf.load();
+    const auto expectedUi = nativeUi.load();
+    const auto expectedWindow = messageWindow.load();
+    const LONG expectedRevision = state->inputRevision;
+    const auto expectedGeneration = keyboardHoldGeneration;
+    struct ActiveFreeze {
+        bool previous = applyingPinch;
+        ActiveFreeze() { activeUpdates.fetch_add(1); applyingPinch = true; }
+        ~ActiveFreeze() { applyingPinch = previous; activeUpdates.fetch_sub(1); }
+    } active;
+    float level = 1; int x = 0, y = 0;
+    if (!readTransform(&level, &x, &y) || !std::isfinite(level) || level < 1 || level > 16) return false;
+    void* keeper = nullptr;
+    if (FAILED(getKeeper(&keeper)) || !keeper) return false;
+    // Reading the native view/keeper can reenter other Windows callbacks. A
+    // close, mode switch or newer input must win before any target is written.
+    if (!keyboardHoldAvailable() || nativeSelf.load() != expectedSelf || nativeUi.load() != expectedUi ||
+        messageWindow.load() != expectedWindow || state->inputRevision != expectedRevision ||
+        keyboardHoldGeneration != expectedGeneration || overviewSuspended.load()) return false;
+    // Retarget Windows' engine once to its rendered factor, not to the last
+    // queued integer goal. Preserve the currently visible source rectangle.
+    const long percent = std::clamp<long>(static_cast<long>(std::lround(level * 100)), level > 1 ? 101 : 100, 1600);
+    const bool primeTracking = level > 1 && (!trackingInitialized.load() || state->nativeLevel <= 10000);
+    originalOption(keeper, 14, percent, false);
+    if (primeTracking) {
+        // Win-minus may already have targeted 100% while the displayed frame
+        // is still magnified. Re-enable the native tracking lifecycle once.
+        setLevel(expectedUi, percent);
+        trackingInitialized.store(true);
+    }
+    originalChange(nativeSelf, level, nullptr);
+    if (level > 1) {
+        alignas(16) RECT rectangle{x, y,
+            x + static_cast<LONG>(std::lround(std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN)) / level)),
+            y + static_cast<LONG>(std::lround(std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN)) / level))};
+        moveTo(nativeSelf, &rectangle, true);
+    }
+    publish(level);
+    trackingInitialized.store(level > 1);
+    InterlockedExchange(&state->appliedSequence, state->requestedSequence);
+    InterlockedExchange(&state->pendingCommand, 0);
+    InterlockedExchange(&state->wheelActive, 0);
+    InterlockedExchange64(&state->wheelPacket, 0);
+    InterlockedIncrement(&state->zoomRevision);
+    InterlockedIncrement(&state->inputRevision);
+    InterlockedIncrement(&state->keyboardHoldFreezes);
+    return true;
+}
+void pollKeyboardHold() {
+    if (nativeCommandDepth) return; // A reentrant timer waits for this native command's final epoch.
+    if (!keyboardHold.active()) return;
+    const auto* state = mapping.get();
+    if (!keyboardHoldAvailable() || !state || state->inputRevision != keyboardHoldRevision ||
+        state->wheelActive || (state->down && state->phase == static_cast<LONG>(pinch::Phase::Pinch))) {
+        cancelKeyboardHold();
+        return; // A newer input wins; never freeze its target.
+    }
+    if (physicalZoomDirection(keyboardHold.direction(), keyboardHeldVk) == keyboardHold.direction()) return;
+    const bool repeated = keyboardHold.repeated();
+    cancelKeyboardHold();
+    if (repeated) freezeKeyboardHold();
+}
 void zoomCommand(void* self, int command) {
     ensureUi(self);
+    const int direction = command == 0x800a ? 1 : command == 0x800b ? -1 : 0;
+    const bool hotkey = direction && keyboardHotkeyDirection == direction;
+    if (hotkey && keyboardHoldAvailable()) {
+        // A queued repeat can outrank WM_TIMER. Observe release before applying
+        // that repeat, then suppress only messages from the completed session.
+        pollKeyboardHold();
+        if (keyboardHold.stale(direction, keyboardHotkeyTimestamp, keyboardClock64())) return;
+    } else if (!nativeCommandDepth) cancelKeyboardHold();
+    int multiplier = 1;
+    if (hotkey && keyboardHoldAvailable()) {
+        if (keyboardHold.active() && keyboardHold.direction() != direction) cancelKeyboardHold();
+        if (!keyboardHold.active()) keyboardHeldVk = keyboardHotkeyVk;
+        multiplier = keyboardHold.command(direction, physicalZoomDirection(direction, keyboardHotkeyVk) == direction,
+                                          mapping.get()->keyboardHoldMultiplier);
+        if (keyboardHold.active() && !keyboardSetTimer(messageWindow, kKeyboardHoldTimer, 16, nullptr)) {
+            cancelKeyboardHold(false); multiplier = 1;
+        }
+    }
     resumeForNativeCommand();
     NativeCommandScope scope;
+    struct StepScope {
+        int previous = keyboardStepMultiplier;
+        explicit StepScope(int value) { keyboardStepMultiplier = value; }
+        ~StepScope() { keyboardStepMultiplier = previous; }
+    } step(multiplier);
+    if (multiplier > 1) InterlockedIncrement(&mapping.get()->keyboardHoldRepeats);
     originalZoomCommand(self, command);
     nativeCommandComplete(scope.rendererBefore);
+    if (keyboardHold.active()) keyboardHoldRevision = mapping.get()->inputRevision;
 }
 // Windows has already recognized its Ctrl+Alt+wheel shortcut here. Retain the
 // signed high-resolution delta and route it once to the host's finite trajectory.
 void wheel(void* self, int delta) {
+    if (!nativeCommandDepth) cancelKeyboardHold();
     ensureUi(self);
     auto* state = mapping.get();
     if (state && state->wheelEnabled && state->controlEnabled &&
@@ -2345,6 +2552,7 @@ void option(void* self, int name, long value, bool save) {
     const long previousMode = name == 4 ? getOption(self, 4) : 0;
     originalOption(self, name, value, save);
     if (name == 4 && mapping.get() && previousMode != getOption(self, 4)) {
+        cancelKeyboardHold();
         // Mode changes can destroy the fullscreen renderer. Do not keep using it.
         InterlockedExchange(&mapping.get()->magnifierReady, 0);
         nativeSelf = nullptr;
@@ -2360,6 +2568,7 @@ bool updateOverview() {
     if (!state->shellMask) InterlockedExchange(&state->overviewBypassed, 0);
     const bool suspend = !state->overviewBypassed && overviewAvailable() && state->controlEnabled && state->normalInOverview && state->shellMask != 0 && (overviewSuspended.load() || !state->pendingGestures);
     if (suspend == overviewSuspended.load()) { state->shellApplied = state->shellRevision; return true; }
+    cancelKeyboardHold();
     if (!nativeSelf || !readTransform || !moveTo || rendererThread.load() != GetCurrentThreadId()) return false;
     void* keeper = nullptr;
     if (FAILED(getKeeper(&keeper)) || !keeper) return false;
@@ -2400,12 +2609,23 @@ bool updateOverview() {
     return true;
 }
 LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
+    if (message == kCancelKeyboardHold) { cancelKeyboardHold(w == 0); return 0; }
+    if (message == WM_TIMER && w == kKeyboardHoldTimer) {
+        // This WndProc callback is not a Windhawk hook. Count it before any
+        // external call so a reentrant WM_CLOSE pins outstanding callback code.
+        struct ActiveTimer {
+            ActiveTimer() { activeUpdates.fetch_add(1); }
+            ~ActiveTimer() { activeUpdates.fetch_sub(1); }
+        } active;
+        pollKeyboardHold(); return 0;
+    }
     if (message == WM_CLOSE) {
+        cancelKeyboardHold();
         const bool reentrant = activeUpdates.load() != 0;
         DestroyWindow(window);
         return reentrant ? 1 : 0;
     }
-    if (message == WM_NCDESTROY) { messageWindow.store(nullptr); return DefWindowProcW(window, message, w, l); }
+    if (message == WM_NCDESTROY) { cancelKeyboardHold(); messageWindow.store(nullptr); return DefWindowProcW(window, message, w, l); }
     if (message == updateMessage) {
         if (stopping.load()) return 0;
         struct ActiveUpdate {
@@ -2423,6 +2643,7 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
         const LONG action = InterlockedExchange(&state->pendingCommand, 0);
         void* keeper = nullptr;
         if ((action || sequence != state->appliedSequence) && (state->controlEnabled || action == 3) && state->magnifierReady && nativeUi && SUCCEEDED(getKeeper(&keeper)) && keeper) {
+            cancelKeyboardHold(); // Pinch, wheel or reset supersedes the held keyboard session.
             double level = InterlockedCompareExchange(&state->requestedLevel, 0, 0) / 10000.0;
             if (action) {
                 const double current = getOption(keeper, 14) / 100.0;
@@ -3103,6 +3324,7 @@ pinch::Config settings() {
     config.wheelDuration = std::clamp(Wh_GetIntSetting(L"wheelDuration"), 40, 250);
     config.wheelMaxRate = std::clamp(Wh_GetIntSetting(L"wheelMaxRate"), 50, 2000);
     config.keyboardStep = std::clamp(Wh_GetIntSetting(L"keyboardStep"), 0, 1000);
+    config.keyboardHoldMultiplier = std::clamp(Wh_GetIntSetting(L"keyboardHoldMultiplier"), 1, 4);
     config.edgeMargin = std::clamp(Wh_GetIntSetting(L"edgeMargin"), 0, 40) / 100.0;
     const auto follow = Wh_GetStringSetting(L"mouseFollow");
     if (follow) {
@@ -3190,6 +3412,7 @@ BOOL Wh_ModSettingsChanged(BOOL* reload) {
     *reload = FALSE;
     if (magnifier::role) {
         if (!magnifier::available) return TRUE;
+        if (const HWND target = magnifier::messageWindow.load()) PostMessageW(target, magnifier::kCancelKeyboardHold, 0, 0);
         magnifier::hiding.store(Wh_GetIntSetting(L"hideMagnifier") != 0 &&
             (magnifier::mapping.get()->magnifierReady || (magnifier::capabilities & compatibility::NativeBootstrapWindows)));
         magnifier::keepPointerStable.store(Wh_GetIntSetting(L"keepPointerStable") != 0);
