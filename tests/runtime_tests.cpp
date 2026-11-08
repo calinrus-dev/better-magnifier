@@ -141,6 +141,8 @@ int wmain(int argc, wchar_t** argv) {
         runtime::HostTestAccess::input(host, -120, record.inputRevision, 190);
         runtime::HostTestAccess::tick(host, 300);
         runtime::HostTestAccess::tick(host, 316);
+        runtime::HostTestAccess::tick(host, 348);
+        runtime::HostTestAccess::tick(host, 380);
         require(!runtime::HostTestAccess::active(host) && !record.wheelActive,
                 "host wheel trajectory stops once its endpoint is delivered");
     }
@@ -159,6 +161,118 @@ int wmain(int argc, wchar_t** argv) {
         queryFlags = WTS_SESSIONSTATE_UNLOCK;
         runtime::HostTestAccess::refresh(host, 4100);
         require(runtime::HostTestAccess::sessionActive(host), "unknown lock flags retain the session recovery retry");
+    }
+    {
+        const auto profile = binary_profiles::profiles[0];
+        std::vector<BYTE> image(profile.identity.imageSize);
+        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(image.data());
+        dos->e_magic = IMAGE_DOS_SIGNATURE; dos->e_lfanew = 0x80;
+        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(image.data() + 0x80);
+        nt->Signature = IMAGE_NT_SIGNATURE; nt->FileHeader.Machine = IMAGE_FILE_MACHINE_AMD64;
+        nt->FileHeader.NumberOfSections = 2; nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER64);
+        nt->FileHeader.TimeDateStamp = profile.identity.timestamp;
+        nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+        nt->OptionalHeader.SizeOfImage = profile.identity.imageSize;
+        nt->OptionalHeader.SizeOfHeaders = 4096; nt->OptionalHeader.NumberOfRvaAndSizes = 16;
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG] = {0x1200, sizeof(IMAGE_DEBUG_DIRECTORY)};
+        auto* sections = IMAGE_FIRST_SECTION(nt);
+        sections[0].VirtualAddress = 0x2000; sections[0].Misc.VirtualSize = 0x90000;
+        sections[0].Characteristics = IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ;
+        sections[1].VirtualAddress = 0x100000; sections[1].Misc.VirtualSize = 0x10000;
+        sections[1].Characteristics = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+        auto* debug = reinterpret_cast<IMAGE_DEBUG_DIRECTORY*>(image.data() + 0x1200);
+        debug->Type = IMAGE_DEBUG_TYPE_CODEVIEW; debug->SizeOfData = 24; debug->AddressOfRawData = 0x1300;
+        auto* data = image.data() + 0x1300;
+        data[0]='R'; data[1]='S'; data[2]='D'; data[3]='S';
+        std::copy(profile.identity.guid.begin(), profile.identity.guid.end(), data + 4); data[20] = 1;
+        const auto module = reinterpret_cast<HMODULE>(image.data());
+        void* targets[12]{};
+        require(binary_profiles::resolve(module, binary_profiles::Kind::Magnifier, targets, 12) &&
+                targets[0] == image.data() + profile.rvas[0], "an exact verified image resolves its offline profile without symbols");
+        data[4] ^= 1;
+        targets[0] = nullptr;
+        require(!binary_profiles::resolve(module, binary_profiles::Kind::Magnifier, targets, 12) && !targets[0],
+                "a changed CodeView identity never reuses offsets from a previous Windows binary");
+        data[4] ^= 1; data[20] = 2;
+        require(!binary_profiles::resolve(module, binary_profiles::Kind::Magnifier, targets, 12), "changed PDB age invalidates the whole offline profile");
+        data[20] = 1; nt->FileHeader.TimeDateStamp ^= 1;
+        require(!binary_profiles::resolve(module, binary_profiles::Kind::Magnifier, targets, 12), "changed PE timestamp invalidates offline offsets");
+        nt->FileHeader.TimeDateStamp ^= 1;
+        sections[0].Characteristics = IMAGE_SCN_MEM_READ;
+        require(!binary_profiles::resolve(module, binary_profiles::Kind::Magnifier, targets, 12), "a function RVA in nonexecutable memory cannot become a hook target");
+        require(!binary_profiles::permitted(module, profile.identity.imageSize + 4, false), "profile RVA validation rejects out-of-image addresses");
+        require(binary_profiles::permitted(module, 0x100000, true) && !binary_profiles::permitted(module, 0x100001, true),
+                "data targets require writable aligned storage");
+        debug->AddressOfRawData = profile.identity.imageSize - 8;
+        require(!binary_profiles::identify(module), "truncated CodeView records cannot be read outside the image");
+    }
+    {
+        bridge::Record record{};
+        record.magnifierPid = static_cast<LONG>(GetCurrentProcessId()); record.magnifierReady = 1;
+        record.enabled = 1; record.controlEnabled = 1; record.inputRevision = 70;
+        runtime::Host host(pinch::Config{}); simulated = {2, 0, 0};
+        runtime::HostTestAccess::prepare(host, record);
+        for (int i=0; i<10000; ++i) bridge::enqueueWheel(&record, 1, 70, 1000);
+        require(!runtime::HostTestAccess::active(host), "producer cannot render before the host consumes its bounded mailbox");
+        runtime::HostTestAccess::tick(host, 1000);
+        require(record.wheelPacket == 0 && runtime::HostTestAccess::active(host) && runtime::HostTestAccess::goal(host) < 3,
+                "host consumes a free-spin burst once with bounded lookahead");
+        runtime::HostTestAccess::tick(host, 1016); runtime::HostTestAccess::tick(host, 1032);
+        bridge::enqueueWheel(&record, -1, 70, 1032);
+        runtime::HostTestAccess::tick(host, 1032);
+        const double beforeReverse = simulated.zoom;
+        runtime::HostTestAccess::tick(host, 1048); runtime::HostTestAccess::tick(host, 1064);
+        require(simulated.zoom < beforeReverse, "tiny reversal after a large burst responds without old positive momentum");
+        runtime::HostTestAccess::cancel(host);
+        require(!record.wheelPacket && record.inputRevision != 70, "cancel invalidates and empties queued wheel data");
+        bridge::enqueueWheel(&record, 120, record.inputRevision, 1100);
+        runtime::HostTestAccess::tick(host, 1301);
+        require(!runtime::HostTestAccess::active(host) && !record.wheelPacket,
+                "input older than two hundred milliseconds cannot replay after a stall");
+        bridge::enqueueWheel(&record, 120, record.inputRevision, 1320);
+        record.shellMask = 1; runtime::HostTestAccess::tick(host, 1320);
+        require(!runtime::HostTestAccess::active(host) && !record.wheelPacket, "overview drops pending wheel input without retaining it");
+        record.shellMask = 0;
+        bridge::enqueueWheel(&record, 120, record.inputRevision, 1340);
+        InterlockedIncrement(&record.inputRevision); runtime::HostTestAccess::tick(host, 1340);
+        require(!runtime::HostTestAccess::active(host), "a keyboard revision rejects an old producer packet");
+    }
+    {
+        bridge::Record record{};
+        record.magnifierPid = static_cast<LONG>(GetCurrentProcessId()); record.magnifierReady = 1;
+        record.nativeCaps = compatibility::NativeCore | compatibility::NativeWheel;
+        record.gateCaps = 0; record.gateReady = 0; record.inputRevision = 90;
+        runtime::Host host(pinch::Config{}); simulated = {2, 0, 0};
+        runtime::HostTestAccess::prepare(host, record);
+        bridge::enqueueWheel(&record, 120, 90, 1000);
+        runtime::HostTestAccess::tick(host, 1000); runtime::HostTestAccess::tick(host, 1016); runtime::HostTestAccess::tick(host, 1032);
+        require(runtime::HostTestAccess::active(host) && simulated.zoom > 2 && !record.gateReady,
+                "a missing shell gesture backend does not disable smooth mouse wheel zoom");
+        runtime::HostTestAccess::cancel(host);
+        record.magnifierReady = 0; record.nativeCaps = 0; record.resolverReasonNative = ERROR_NOT_SUPPORTED;
+        const double beforeFallback = simulated.zoom;
+        runtime::HostTestAccess::input(host, 120, record.inputRevision, 1100);
+        require(!runtime::HostTestAccess::active(host) && simulated.zoom == beforeFallback,
+                "an unverified native backend cannot receive a replacement transform from wheel input");
+    }
+    {
+        bridge::Record record{};
+        record.magnifierPid = static_cast<LONG>(GetCurrentProcessId()); record.magnifierReady = 1; record.nativeLevel = 30000;
+        runtime::Zoom zoom; simulated = {3, 0, 0};
+        zoom.useTestBackend(readView, writeView, readCursor, true); zoom.useTestNativeRecord(&record);
+        require(zoom.current() == 3, "test starts with a working native backend");
+        record.magnifierReady = 0; record.resolverReasonNative = ERROR_NOT_SUPPORTED;
+        require(!zoom.target(4, true) && !zoom.resetToNormal() && zoom.tick(16, 0) && simulated.zoom == 3,
+                "backend loss or pause cannot write a public replacement transform over native Windows zoom");
+    }
+    {
+        bridge::Record record{};
+        record.magnifierPid = static_cast<LONG>(GetCurrentProcessId()); record.magnifierReady = 1; record.inputRevision = 123;
+        runtime::Host host(pinch::Config{}); simulated = {2, 0, 0}; runtime::HostTestAccess::prepare(host, record);
+        bridge::enqueueWheel(&record, 1, 123, 1001);
+        runtime::HostTestAccess::tick(host, 1000);
+        require(runtime::HostTestAccess::active(host) && !record.wheelPacket,
+                "a fresh producer timestamp one millisecond after the sampled frame is not discarded");
     }
     if (argc != 2) {
         std::cerr << "Usage: runtime-tests path-to-mod.dll\n";

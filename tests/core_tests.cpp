@@ -460,5 +460,88 @@ int main() {
         require(!launch.mayLaunch(9000), "Win Esc before READY still causes startup retries");
         launch.request(); require(launch.mayLaunch(9000), "fresh physical input cannot recover after early close");
     });
+    test("missing optional native symbols preserve the continuous core", [] {
+        constexpr auto all = (1u << 12) - 1;
+        for (unsigned index : {6, 8, 9}) {
+            const auto plan = compatibility::nativePlan(all & ~compatibility::symbol(index));
+            require(plan.supported && (plan.capabilities & compatibility::NativeCore), "optional native symbol disabled the entire backend");
+        }
+        require(compatibility::nativePlan(all & ~compatibility::symbol(4)).supported, "window bootstrap cannot replace absent Run");
+        require(!(compatibility::nativePlan(all & ~compatibility::symbol(10)).capabilities & compatibility::NativeBootstrapWindows),
+                "one WndProc cannot enable a half bootstrap group");
+    });
+    test("missing required native symbols preserve Windows instead of installing partial hooks", [] {
+        constexpr auto all = (1u << 12) - 1;
+        for (unsigned index : {0, 1, 2, 3, 5, 7}) require(!compatibility::nativePlan(all & ~compatibility::symbol(index)).supported,
+            "missing native core still allowed unsafe private calls");
+        require(!compatibility::nativePlan(all & ~compatibility::symbol(4) & ~compatibility::symbol(11)).supported,
+            "missing both bootstrap routes still allowed private calls");
+    });
+    test("optional view signals do not disable touchpad gesture suppression", [] {
+        for (unsigned index : {4, 5}) {
+            const auto plan = compatibility::gatePlan(63 & ~compatibility::symbol(index), true);
+            require(plan.supported && (plan.capabilities & compatibility::GateSwipe) && !(plan.capabilities & compatibility::GateVisibility),
+                    "one missing visibility signal disables the whole gesture gate");
+        }
+        for (unsigned index : {0, 1, 2, 3}) require(!compatibility::gatePlan(63 & ~compatibility::symbol(index), true).supported,
+                "an incomplete gesture group was accepted");
+        require(!compatibility::overviewAllowed(0, compatibility::GateVisibility) &&
+                !compatibility::overviewAllowed(compatibility::NativeViewportRestore, compatibility::GateSwipe),
+                "overview cannot restore level and position with an incomplete capability set");
+    });
+    test("free wheel mailbox coalesces ten thousand small events into one bounded packet", [] {
+        std::uint64_t packet = 0;
+        for (int i = 0; i < 10000; ++i) packet = pinch::mergeWheel(packet, 1, 7);
+        require(pinch::wheelDelta(packet) == pinch::kWheelPacketLimit && pinch::wheelRevision(packet) == 7, "unbounded mailbox");
+        packet = pinch::mergeWheel(packet, -1, 7);
+        require(pinch::wheelDelta(packet) == -1, "reversal retained the old queue direction");
+        packet = pinch::mergeWheel(packet, 30, 8);
+        require(pinch::wheelDelta(packet) == 30 && pinch::wheelRevision(packet) == 8, "revision mixed stale input");
+    });
+    test("free wheel signed extrema saturate without overflow", [] {
+        auto packet = pinch::mergeWheel(0, 32767, 0xFFFFFFFFu);
+        require(pinch::wheelDelta(packet) == 1200 && pinch::wheelRevision(packet) == 0xFFFFFFFFu, "positive packet overflow");
+        packet = pinch::mergeWheel(packet, -32768, 0xFFFFFFFFu);
+        require(pinch::wheelDelta(packet) == -1200, "negative packet overflow");
+    });
+    test("default wheel notch remains twenty percent with a speed limit", [] {
+        pinch::WheelMotion a, b, c;
+        a.add(120, 2, 100, 20, 100, 16, 400);
+        for (int i=0; i<4; ++i) b.add(30, 2, 100, 20, 100, 16, 400);
+        for (int i=0; i<120; ++i) c.add(1, 2, 100, 20, 100, 16, 400);
+        near(a.goal(), 2.4); near(a.goal(), b.goal()); near(a.goal(), c.goal());
+    });
+    test("free wheel speed and lookahead are bounded and finish without hidden debt", [] {
+        pinch::WheelMotion w; w.add(32767, 1, 100, 20, 100, 16, 400);
+        require(std::log(w.goal()) <= std::log(5.0)*0.20 + 0.000001, "unbounded distance ahead");
+        double previous = 1;
+        for (unsigned now=116; now<=500; now+=16) {
+            const auto next = w.tick(now);
+            if (!next) break;
+            require(std::log(*next/previous) <= std::log(5.0)*0.016 + 0.000001, "wheel exceeds configured rate");
+            previous = *next;
+        }
+        require(!w.active() && !w.tick(10000), "free wheel retained an invisible tail");
+    });
+    test("free wheel reversing a burst responds on the next frame", [] {
+        pinch::WheelMotion w; w.add(32767, 4, 100, 20, 100, 16, 400);
+        const double before = *w.tick(116);
+        w.add(-1, before, 116, 20, 100, 16, 400);
+        require(w.goal() < before && *w.tick(132) < before, "old burst prevented reversing");
+    });
+    test("free wheel limits have no stored positive or negative debt", [] {
+        pinch::WheelMotion w; w.add(32767, 16, 100, 20, 100, 16, 400);
+        require(!w.active(), "upper limit queued invisible motion");
+        w.add(-1, 16, 100, 20, 100, 16, 400); require(*w.tick(116) < 16, "upper limit cannot reverse");
+        w.cancel(); w.add(-32768, 1, 200, 20, 100, 16, 400);
+        require(!w.active(), "lower limit queued invisible motion");
+        w.add(1, 1, 200, 20, 100, 16, 400); require(*w.tick(216) > 1, "lower limit cannot reverse");
+    });
+    test("a stalled wheel timer cannot teleport through an old backlog", [] {
+        pinch::WheelMotion w; w.add(32767, 1, 100, 20, 100, 16, 400);
+        const double after = *w.tick(10000);
+        require(after > 1 && after <= std::pow(5.0, 0.064) + 0.000001, "stall produced a teleport");
+        w.cancel(); require(!w.tick(10016), "cancel retained stalled motion");
+    });
     std::cout << passed << " tests passed\n";
 }

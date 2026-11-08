@@ -22,15 +22,8 @@ BOOL WINAPI clipBackend(const RECT* rectangle) { if (rectangle) ++clipLimits; el
 BOOL WINAPI readView(float* level, int* x, int* y) { *level = static_cast<float>(visibleView.zoom); *x = visibleView.x; *y = visibleView.y; return TRUE; }
 void moveView(void*, const RECT* rectangle, bool animated) { restoredTarget = animated; ++cameraMoves; visibleView.x = rectangle->left; visibleView.y = rectangle->top; }
 void rendererCommand(void* self, int) { magnifier::change(self, 3.7f, nullptr); magnifier::option(self, 14, 100, false); }
-int originalWheelCalls = 0, wheelPosts = 0, postedDelta = 0;
-LONG postedRevision = 0;
-bool wheelPostSuccess = true;
+int originalWheelCalls = 0;
 void nativeWheel(void*, int) { ++originalWheelCalls; }
-BOOL WINAPI wheelPost(HWND, UINT message, WPARAM w, LPARAM l) {
-    if (message != runtime::kWheelMessage) return FALSE;
-    ++wheelPosts; postedDelta = static_cast<int>(w); postedRevision = static_cast<LONG>(l);
-    return wheelPostSuccess;
-}
 LRESULT CALLBACK windowBackend(HWND, UINT, WPARAM, LPARAM) { return 321; }
 LONG_PTR WINAPI existingObject(HWND, int index) { return index == GWLP_USERDATA ? 0x6789 : 0; }
 HRESULT keeper(void** result) { *result = reinterpret_cast<void*>(0x1000); return S_OK; }
@@ -181,6 +174,8 @@ int wmain() {
     magnifier::originalZoomCommand = command;
     magnifier::readTransform = readView;
     magnifier::moveTo = moveView;
+    state.nativeCaps = compatibility::NativeCore | compatibility::NativeViewportRestore | compatibility::NativeKeyboardObserver;
+    state.gateCaps = compatibility::GateSwipe | compatibility::GateVisibility;
     state.normalInOverview = 1;
     state.controlEnabled = 1;
     state.pendingGestures = 0;
@@ -201,10 +196,9 @@ int wmain() {
     magnifier::updateOverview();
     require(directWrites == enteredWrites && magnifier::overviewView->zoom == 2.75,
             "nested desktop and Task View reasons never overwrite the saved view");
-    magnifier::zoomCommand(nullptr, 0x800A);
     deliver(45000, 100);
     require(visibleView.zoom == 1 && directWrites == enteredWrites,
-            "overview remains at 100 percent while native keys or stale touch arrive");
+            "overview remains at 100 percent while stale touch arrives");
     state.shellMask = 2;
     state.shellRevision = 3;
     magnifier::updateOverview();
@@ -249,32 +243,30 @@ int wmain() {
     require(magnifier::nativeUi.load() == reinterpret_cast<void*>(0x1000),
             "a native keyboard or UI command can recover a context injected after startup");
     magnifier::originalWheel = nativeWheel;
-    magnifier::postWheel = wheelPost;
     state.hostWindow = 0x1234;
     state.wheelEnabled = 1; state.controlEnabled = 1; state.enabled = 1;
     state.heartbeat = static_cast<LONG64>(GetTickCount64()); state.shellMask = 0;
     state.inputRevision = 42;
     magnifier::wheel(reinterpret_cast<void*>(0x1000), -30);
-    require(wheelPosts == 1 && postedDelta == -30 && postedRevision == 42 && originalWheelCalls == 0,
-            "native wheel posts one signed high-resolution event without a second native zoom");
+    require(pinch::wheelDelta(state.wheelPacket) == -30 && pinch::wheelRevision(state.wheelPacket) == 42 && originalWheelCalls == 0,
+            "native wheel stores signed high-resolution input without a second native zoom");
     state.enabled = 0;
     magnifier::wheel(nullptr, 30);
-    require(wheelPosts == 2 && originalWheelCalls == 0,
-            "mouse-only wheel input still works after a reset without a new touchpad frame");
-    state.enabled = 1;
-    state.wheelEnabled = 0;
+    require(pinch::wheelDelta(state.wheelPacket) == 30 && originalWheelCalls == 0,
+            "mouse-only wheel input works after reset and discards the previous queue direction");
+    state.enabled = 1; state.wheelEnabled = 0;
     magnifier::wheel(nullptr, 120);
-    require(originalWheelCalls == 1 && wheelPosts == 2, "wheel opt-out restores native shortcut behavior");
-    state.wheelEnabled = 1; wheelPostSuccess = false;
+    require(originalWheelCalls == 1 && pinch::wheelDelta(state.wheelPacket) == 30, "wheel opt-out restores native shortcut behavior");
+    state.wheelEnabled = 1; state.hostWindow = 0;
     magnifier::wheel(nullptr, 120);
-    require(originalWheelCalls == 2, "failed wheel delivery preserves native behavior");
-    wheelPostSuccess = true; state.heartbeat = static_cast<LONG64>(GetTickCount64() - 500);
+    require(originalWheelCalls == 2, "an absent host window preserves native behavior");
+    state.hostWindow = 0x1234; state.heartbeat = static_cast<LONG64>(GetTickCount64() - 500);
     magnifier::wheel(nullptr, 120);
     require(originalWheelCalls == 3, "an unavailable host cannot swallow the native wheel shortcut");
     state.heartbeat = static_cast<LONG64>(GetTickCount64());
-    const int postedBeforeOverview = wheelPosts;
+    const auto queuedBeforeOverview = state.wheelPacket;
     state.shellMask = 1; magnifier::wheel(nullptr, 120);
-    require(wheelPosts == postedBeforeOverview && originalWheelCalls == 3, "wheel cannot magnify the overview");
+    require(state.wheelPacket == queuedBeforeOverview && originalWheelCalls == 3, "wheel cannot magnify the overview");
     state.shellMask = 0;
     state.wheelActive = 1; state.down = 0;
     const int warpsBeforeWheel = cursorWarps, clipsBeforeWheel = clipLimits;
@@ -306,5 +298,46 @@ int wmain() {
     magnifier::fullWindowProc(nullptr, WM_NULL, 0, 0);
     require(state.inputRevision == recoveredEpoch, "repeated harmless window messages do not reset wheel or pinch motion");
     magnifier::messageWindow.store(nullptr);
+    state.magnifierReady = 1; state.controlEnabled = 1; state.requestWheel = 1;
+    state.nativeLevel = 10000; percent = 100; visibleView = {1, 0, 0};
+    magnifier::trackingInitialized.store(false); magnifier::nativeSelf.store(reinterpret_cast<void*>(0x2000));
+    const int uiBeforeFine = uiCalls, writesBeforeFine = directWrites;
+    deliver(10001, 500);
+    require(uiCalls == uiBeforeFine + 1 && directWrites == writesBeforeFine + 1 && state.nativeLevel == 10001 &&
+            std::abs(visibleView.zoom - 1.0001) < 0.000001 && percent == 100,
+            "first tiny wheel delta primes native tracking once and delivers its fine target in the same UI turn");
+    deliver(10002, 501);
+    require(uiCalls == uiBeforeFine + 1 && directWrites == writesBeforeFine + 2 && state.nativeLevel == 10002,
+            "a second tiny wheel delta does not prime native UI again");
+    state.requestWheel = 0;
+    InterlockedExchange64(&state.wheelPacket, 0);
+    for (int i=0; i<10000; ++i) bridge::enqueueWheel(&state, 1, state.inputRevision, 1000);
+    require(pinch::wheelDelta(state.wheelPacket) == 1200, "producer burst remains bounded without posting a message per delta");
+    bridge::enqueueWheel(&state, -1, state.inputRevision, 1001);
+    require(pinch::wheelDelta(state.wheelPacket) == -1, "producer reversal discards its old accumulated direction");
+    const auto queued = state.wheelPacket;
+    bridge::enqueueWheel(&state, 120, state.inputRevision - 1, 1002);
+    require(state.wheelPacket == queued, "stale producer revision cannot enter the mailbox");
+    bridge::enqueueWheel(&state, 30, state.inputRevision, 1303);
+    require(pinch::wheelDelta(state.wheelPacket) == 30, "a new producer event cannot revive stale accumulated input");
+    visibleView = {2.75, 20, 30}; state.shellMask = 1; state.overviewBypassed = 0;
+    magnifier::updateOverview();
+    require(magnifier::overviewSuspended.load(), "overview starts suspended before native keyboard override");
+    const LONG nativeKeysBefore = state.nativeCommands;
+    magnifier::zoomCommand(reinterpret_cast<void*>(0x6789), 0x800A);
+    require(!magnifier::overviewSuspended.load() && state.nativeCommands > nativeKeysBefore && state.overviewBypassed,
+            "an explicit native keyboard command cannot be swallowed by a stale overview signal");
+    magnifier::updateOverview();
+    require(!magnifier::overviewSuspended.load(), "overview cannot immediately recapture the keyboard override");
+    state.shellMask = 0; magnifier::updateOverview();
+    require(!state.overviewBypassed, "closing overview clears its temporary native-keyboard override");
+    state.shellMask = 1; state.overviewBypassed = 0;
+    const int writesBeforeQueuedOverview = directWrites;
+    magnifier::zoomCommand(reinterpret_cast<void*>(0x6789), 0x800A);
+    require(state.overviewBypassed, "explicit native key overrides even an overview suspension still pending in the worker");
+    magnifier::updateOverview();
+    require(!magnifier::overviewSuspended.load() && directWrites == writesBeforeQueuedOverview,
+            "a queued overview update cannot undo a native keyboard command");
+    state.shellMask = 0; magnifier::updateOverview();
     std::cout << checks << " native adapter checks passed; fake backend; desktop unchanged\n";
 }

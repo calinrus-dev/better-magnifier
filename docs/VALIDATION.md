@@ -2,6 +2,24 @@
 
 Fecha de revisión: 8 de noviembre de 2026.
 
+## Estado de 0.6.0
+
+- 75 pruebas del núcleo, 53 del runtime/ABI, 68 del adaptador nativo, 25 del shell y 14 del lanzamiento público: 235 comprobaciones sin zoom ni teclas/clics sintéticos.
+- Ráfagas de 10.000 entradas, deltas fraccionarios, extremos signed, saturación, reversión, caducidad y paquetes publicados durante un frame. Primer delta pequeño con primado único y entrega decimal fina en el mismo turno de UI.
+- Protocolo del shell probado ante cuarto contacto después de cancelar, rechazo de compatibilidad, Start inicial/diferido fallido y Continue fallido. Un gesto terminal no se reactiva.
+- Teclado explícito probado con overview ya suspendido y aún pendiente: restaura y prevalece, sin volver inmediatamente al 100 %.
+- Perfiles probados frente a GUID/edad/timestamp distintos, secciones no ejecutables, destinos fuera de imagen y CodeView truncado. Los tres perfiles del equipo se verificaron mapeando los archivos como recursos, sin ejecutar sus entradas.
+- Fallos de símbolos opcionales conservan el núcleo; wheel sin gate funciona. Un backend no verificado o perdido no recibe transformaciones públicas alternativas, ni desde pausa/reset.
+- API pública de feedback COM contrastada con SDK 26100 y comprobada con lanzador falso, sin abrir procesos reales.
+
+Regresión física de 0.5.0: tras una validación inicial positiva, el usuario notificó Inicio/Win+S/Win+«−» y clic izquierdo intermitentes; confirmó recuperación de las teclas al desactivar el mod. La revisión encontró una secuencia inválida Start→Cancel→Continue/Finish al cambiar contactos, y consumo de comandos de teclado en overview. Las correcciones se verifican automáticamente; aún no se atribuye toda la regresión a una sola causa.
+
+Registro pasivo del cursor de 45 segundos: no observó WAIT/APPSTARTING; no confirma el origen del indicador azul referido. La nueva opción solo pide suprimir feedback de arranque de Magnify; conserva cursores de las demás aplicaciones.
+
+La 0.6.0 final está instalada con DLL verificada por SHA-256. Diagnóstico: nativeCaps=0x7f, gateCaps=0x7, los tres resolutores en perfil offline verificado, sin error. El usuario confirmó Inicio, Win+S, Win+«+»/«−» y clics normales antes/después de zoom; también primer paso pequeño desde el 100 %, giro libre rápido e inversión, alternando con pellizco.
+
+Pendiente: reinicio completo de Windows, suspensión, nueva activación lateral con SetForegroundWindow y otros equipos/pantallas. El mod anterior se dejó desactivado durante la corrección y la nueva revisión se activó para esa comprobación. No se han ejecutado oscilaciones visibles de zoom.
+
 ## Estado de 0.5.0
 
 - 65 pruebas del núcleo, 33 del runtime/ABI, 56 del adaptador nativo y 18 del filtro del shell: 172 en total. Backend simulado, sin cambiar el escritorio.

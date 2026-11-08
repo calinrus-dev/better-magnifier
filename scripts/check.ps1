@@ -45,7 +45,7 @@ Invoke-Compile 'core-tests' ($common + @((Join-Path $projectRoot 'tests\core_tes
 & $testExe
 if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas ($LASTEXITCODE)." }
 
-$links = @('-lhid', '-lwtsapi32', '-lshell32', '-luser32', '-ladvapi32', '-ldwmapi')
+$links = @('-lhid', '-lwtsapi32', '-lshell32', '-luser32', '-ladvapi32', '-ldwmapi', '-lole32')
 $hostExe = Join-Path $buildPath 'pinch-zoom-host.exe'
 Invoke-Compile 'host' ($common + @('-DPINCH_ZOOM_STANDALONE', '-municode', $source, '-o', $hostExe) + $links)
 Invoke-Compile 'mod' ($common + @('-shared', '-Wl,--export-all-symbols', '-DWH_MOD', ('-DWH_MOD_ID=L"' + $id + '"'),
@@ -66,6 +66,10 @@ Invoke-Compile 'native-gate-tests' ($common + @('-municode', (Join-Path $project
     '-o', $gateTest) + $links)
 & $gateTest
 if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas del filtro del shell ($LASTEXITCODE)." }
+$feedbackTest = Join-Path $buildPath 'launch-feedback-tests.exe'
+Invoke-Compile 'launch-feedback-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\launch_feedback_tests.cpp'), '-o', $feedbackTest) + $links)
+& $feedbackTest
+if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas de inicio sin feedback ($LASTEXITCODE)." }
 Invoke-Compile 'native-integration' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_integration.cpp'),
     '-o', (Join-Path $buildPath 'native-integration.exe')) + $links)
 Invoke-Compile 'native-performance' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_performance.cpp'),

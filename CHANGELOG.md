@@ -1,5 +1,14 @@
 # Cambios
 
+## 0.6.0 — 2026-11-08 (experimental)
+
+- Sensibilidad predeterminada de rueda al 20 %, primer paso decimal fino y control configurable de velocidad para ruedas libres. Acumulador acotado por revisión; caducidad de 200 ms sin cola de mensajes por delta.
+- Cancelación terminal de gestos: ningún Continue/Finish después de Cancel o de un Start fallido. Limpieza ante Continue fallido. Activación lateral mediante SetForegroundWindow sin Alt/Ctrl+Tab implícito.
+- Los comandos nativos de teclado prevalecen sobre la suspensión de multitarea, incluida una suspensión todavía pendiente.
+- Perfiles offline ligados a la identidad exacta de los binarios, validación de secciones y capacidades independientes. La Lupa nativa permanece operativa si una interfaz es incompatible.
+- Supresión opcional del indicador de arranque mediante una interfaz pública del Shell; un fallo de esa opción no impide abrir la Lupa.
+- 235 comprobaciones automáticas. El usuario confirmó recuperación de teclas/clics, primer paso y rueda libre controlada con pellizco y teclado.
+
 ## 0.5.0 — 2026-11-08 (experimental)
 
 - Nuevo nombre: Better Magnifier. Conserva el identificador del mod para actualizar instalaciones previas.

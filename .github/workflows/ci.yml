@@ -42,6 +42,7 @@ jobs:
             build/runtime-tests.exe
             build/native-adapter-tests.exe
             build/native-gate-tests.exe
+            build/launch-feedback-tests.exe
             build/native-integration.exe
             build/native-performance.exe
             scripts/measure-performance.ps1

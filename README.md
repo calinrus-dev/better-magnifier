@@ -4,15 +4,15 @@
 
 Un proyecto de **accesibilidad para Windows**, inspirado en el efecto de zoom de **KWin / KDE Plasma**. Permite ampliar todo el escritorio con un **pellizco de tres dedos**, usando el motor de la Lupa de Windows. Abre los dedos para acercar y ciérralos para alejar. Puedes alternarlo con **Win + «+» / «−»**, también en el teclado numérico.
 
-**0.5.0 experimental.** Añade Ctrl+Alt+rueda con transiciones continuas y sensibilidad configurable, y refuerza el inicio de sesión y la recuperación. El usuario confirmó en el equipo de desarrollo la rueda fluida, su alternancia con pellizco y teclado y el cierre/reapertura. La comprobación tras reiniciar Windows y la compatibilidad con otros equipos siguen pendientes.
+**0.6.0 experimental.** Rueda al 20 % por muesca, entrada de rueda libre acotada y primer paso fino desde el 100 %. Corrige estados de gesto cancelado y da prioridad a los atajos nativos. Añade perfiles offline verificados y degradación por capacidades. El usuario confirmó Inicio/Win+S, atajos de Lupa y clics normales, primer paso fino y rueda libre controlada alternando con pellizco.
 
-Requiere Windows 11 x64, compilación **26200**, y Windhawk **1.7.3**. Los símbolos privados de Windows pueden cambiar con una actualización. El mod conserva la configuración de gestos del touchpad.
+Las funciones avanzadas están validadas en Windows 11 x64, compilación **26200**, con Windhawk **1.7.3**. Una versión o interfaz no verificada conserva los controles estándar de la Lupa; no implica soporte del zoom continuo. El mod conserva la configuración de gestos del touchpad.
 
 Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantalla con menos cambios entre touchpad y teclado. Proyecto independiente, sin afiliación con KDE o Microsoft.
 
 ## Comportamiento
 
-- **Ctrl+Alt+rueda** amplía o reduce de forma continua. Cada muesca aplica un cambio proporcional (15 % por defecto); una rueda de alta resolución conserva los deltas pequeños. Las ráfagas suman recorrido y cambiar de sentido cancela el impulso anterior. La rueda sin esa combinación conserva su función normal.
+- **Ctrl+Alt+rueda** amplía o reduce de forma continua. Cada muesca aplica un cambio proporcional (20 % por defecto); una rueda de alta resolución conserva los deltas pequeños. Las ráfagas suman recorrido y cambiar de sentido cancela el impulso anterior. La rueda sin esa combinación conserva su función normal.
 
 - Distingue el pellizco del movimiento de los tres dedos juntos. Los gestos de dos y cuatro dedos conservan su comportamiento.
 - Un deslizamiento horizontal de tres dedos cambia directamente de ventana, una por gesto, sin navegar por un selector: izquierda siguiente, derecha anterior. Es configurable. Filtra ventanas ocultas, auxiliares y cloaked, y conserva una secuencia para que los gestos sucesivos recorran más de dos ventanas.
@@ -31,8 +31,10 @@ Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantall
 En la pestaña **Ajustes** del mod:
 
 - **Smooth Ctrl+Alt+mouse wheel zoom:** activado por defecto. Desactivarlo conserva el zoom por rueda de Windows.
-- **Wheel zoom per notch:** 15 % por defecto, ajustable entre 1 y 100 %.
+- **Wheel zoom per notch:** 20 % por defecto, ajustable entre 1 y 100 %.
 - **Wheel transition time:** 100 ms por defecto, ajustable entre 40 y 250 ms.
+- **Maximum wheel zoom growth per second:** 400 % de crecimiento por segundo por defecto (hasta multiplicar por cinco en un segundo). Limita los giros extremos de una rueda libre; el recorrido pendiente se acota y caduca tras una pausa.
+- **Suppress Magnifier startup feedback cursor:** activado por defecto. Pide a Windows que omita el indicador azul al abrir la Lupa desde el mod; es una petición opcional que no impide abrirla si Windows la rechaza.
 
 - **Zoom sensitivity:** 100 % por defecto, seguimiento proporcional a la separación.
 - **Pinch acceleration:** 35 % por defecto; 0 desactiva la aceleración.
@@ -46,7 +48,7 @@ En la pestaña **Ajustes** del mod:
 - **Hide Windows Magnifier window and touch controls:** activado por defecto.
 - **Observe only:** reconoce sin aplicar zoom.
 
-El seguimiento del ratón, el teclado, el texto y Narrador se configura en la Lupa de Windows. Durante Task View o Mostrar escritorio el zoom permanece temporalmente suspendido; los comandos de ampliación se reanudan al salir. `Smoothing` solo afecta al modo independiente de la API; el modo nativo conserva sus animaciones. Desactivar `Share zoom with Windows Magnifier shortcuts` habilita el modo experimental de API independiente y pierde la integración nativa; no es la opción recomendada.
+El seguimiento del ratón, el teclado, el texto y Narrador se configura en la Lupa de Windows. Durante Task View o Mostrar escritorio el zoom se suspende temporalmente. Un comando explícito de teclado recupera la vista anterior y tiene prioridad sobre esa suspensión, incluso si aún estaba pendiente. **Native Windows Magnifier integration** permite combinar pellizco, rueda y atajos. Al desactivarla se conserva el comportamiento estándar de Windows.
 
 ## Instalación
 
@@ -59,7 +61,7 @@ El mod es local; no necesita publicarse en el catálogo de Windhawk. Al actualiz
 
 Después de compilar también puedes ejecutar `scripts/install-local.ps1` en PowerShell **como administrador**. Está limitado a la instalación estándar de Windhawk y a `local@kde-pinch-zoom`. Conserva los ajustes existentes y añade los nuevos valores predeterminados. Por la integración solicitada, desactiva únicamente el antiguo `magnifier-headless`, conservándolo instalado. Cierra la Lupa de la sesión actual, restaura el 100 % e instala una DLL con nombre basado en su hash. Ante un fallo recupera la configuración previa. No modifica las claves de gestos del touchpad ni otros mods.
 
-`-Disable` desactiva este mod. `-Acceleration 35 -MaximumZoom 0` permite cambiar esos dos ajustes explícitamente. El resultado queda en `build/install-result.json`. El instalador comprueba `build/build-info.json` para evitar instalar una DLL que no corresponda al código.
+`-Disable` desactiva este mod. `-WheelStep 20` actualiza explícitamente la sensibilidad de una instalación existente; sus otros ajustes se conservan. `-Acceleration 35 -MaximumZoom 0` permite cambiar esos dos ajustes explícitamente. El resultado queda en `build/install-result.json`. El instalador comprueba `build/build-info.json` para evitar instalar una DLL que no corresponda al código.
 
 ### Inicio de Windows
 
@@ -78,6 +80,14 @@ Bloqueo, suspensión y desconexión invalidan la entrada pendiente. Al reanudar 
 
 `build/pinch-zoom-host.exe --status` debe mostrar `Native gate: READY` y `Windows Magnifier: READY`. `actualZoom` consulta el nivel renderizado, no el objetivo pendiente de la animación. `--reset` solicita el 100 %.
 
+## Compatibilidad tras actualizaciones
+
+Para los binarios verificados incluidos, el mod resuelve localmente las direcciones mediante su GUID/edad CodeView, tamaño de imagen y timestamp PE, y comprueba las secciones de destino. No necesita descargar sus símbolos. Un cambio de identidad invalida el perfil completo: nunca reutiliza direcciones de otra actualización. Los perfiles actuales corresponden a los binarios comprobados de Windows 11 26200.9711.
+
+En una compilación admitida sin perfil, intenta resolver símbolos Microsoft con Windhawk y valida cada dirección. Las capacidades se habilitan por grupos completos: núcleo, rueda, gestos del shell, señales de vista y restauración espacial. Un grupo opcional ausente desactiva su función. Si falta el gate del shell, la rueda puede continuar aunque se desactive el pellizco. Si falta el núcleo, conserva la Lupa estándar visible y sus atajos; no sustituye el motor por una transformación propia ni reintenta abrirla en bucle.
+
+Esto reduce dependencia de descargas y evita usar direcciones antiguas. Las interfaces privadas siguen pudiendo cambiar; no se promete compatibilidad universal con una actualización futura. `--status` muestra capacidades, motivos y resolutores (`1=perfil offline verificado`, `2=símbolos`).
+
 ## Compilar y comprobar
 
 ```powershell
@@ -86,7 +96,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 
 Para Windhawk portátil añade `-WindhawkPath 'D:\Herramientas\Windhawk'`. Se generan la DLL, el host de diagnóstico y las pruebas en `build/`. El script no instala ni activa mods, no inicia Windhawk y no cambia el zoom.
 
-La compilación ejecuta 65 pruebas del núcleo, 33 del runtime/ABI, 56 del adaptador nativo y 18 del filtro de gestos del shell con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
+La compilación ejecuta 75 pruebas del núcleo, 53 del runtime/ABI, 68 del adaptador nativo, 25 del filtro de gestos del shell y 14 del lanzamiento público: 235 comprobaciones con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
 
 ```powershell
 .\build\native-integration.exe --live

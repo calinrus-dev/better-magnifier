@@ -12,10 +12,10 @@ bridge::Record record{};
 std::string calls;
 UINT32 contacts = 3;
 int lastDirection = 0;
-HRESULT startResult = S_OK;
+HRESULT startResult = S_OK, continueResult = S_OK;
 BOOL WINAPI frame(UINT32, UINT32* count, POINTER_INFO*) { *count = contacts; return contacts ? TRUE : FALSE; }
 HRESULT start(void*, int, int, unsigned, native_gate::Context) { calls += 'S'; return startResult; }
-HRESULT step(void*, int, int, int, int, unsigned) { calls += 'C'; return S_OK; }
+HRESULT step(void*, int, int, int, int, unsigned) { calls += 'C'; return continueResult; }
 HRESULT finish(void*, int, int, int, int, unsigned) { calls += 'F'; return S_OK; }
 HRESULT cancel(void*) { calls += 'X'; return S_OK; }
 bool activate(int direction) { calls += 'J'; lastDirection = direction; return true; }
@@ -31,7 +31,7 @@ void prepare(pinch::Phase phase, UINT32 count = 3, bool down = true) {
     record.swipeDirection = -2;
     record.pendingGestures = 0;
     contacts = count;
-    startResult = S_OK;
+    startResult = S_OK; continueResult = S_OK;
     calls.clear();
 }
 void begin() { native_gate::start(object, 10, 20, 1, {}); }
@@ -103,8 +103,10 @@ int wmain() {
     require(calls == "SX" && record.pendingGestures == 0, "cancel releases provisional shell state");
     prepare(pinch::Phase::Pending);
     startResult = E_FAIL;
-    require(FAILED(native_gate::start(object, 0, 0, 1, {})) && native_gate::states.empty() && record.pendingGestures == 0,
+    require(FAILED(native_gate::start(object, 0, 0, 1, {})) && record.pendingGestures == 0,
             "failed native start leaves no pending state");
+    move(); end();
+    require(calls == "S" && native_gate::states.empty(), "failed Start cannot be followed by native Continue or Finish");
     record.shellMask = 0;
     native_gate::shown(object, 4);
     require(record.shellMask == 0, "other shell selectors do not masquerade as Task View");
@@ -115,5 +117,35 @@ int wmain() {
     require(record.shellMask == 2, "closing Task View preserves a still-visible desktop reason");
     native_gate::mapping.shellReason(2, false);
     require(record.shellMask == 0, "all overview reasons can finish independently");
+    prepare(pinch::Phase::Pinch);
+    record.nativeCaps = 0; record.resolverReasonNative = ERROR_NOT_SUPPORTED;
+    begin(); move(); end();
+    require(calls == "SCF", "a definitively unsupported zoom backend cannot consume Windows gestures");
+    record.resolverReasonNative = 0;
+    prepare(pinch::Phase::Pinch);
+    begin();
+    record.resolverReasonNative = ERROR_NOT_SUPPORTED;
+    move(); end();
+    require(calls == "SCF", "a suppression latch is released if compatibility is rejected during the gesture");
+    record.resolverReasonNative = 0;
+    prepare(pinch::Phase::Pending);
+    begin(); record.phase = static_cast<LONG>(pinch::Phase::Pinch); move();
+    contacts = 4; move(); end();
+    require(calls == "SX" && native_gate::states.empty() && record.pendingGestures == 0,
+            "a cancelled pinch cannot resume or finish a native gesture when a fourth contact appears");
+    prepare(pinch::Phase::Pending);
+    begin(); record.phase = static_cast<LONG>(pinch::Phase::Pinch); move();
+    record.resolverReasonNative = ERROR_NOT_SUPPORTED; move(); end();
+    require(calls == "SX" && native_gate::states.empty(),
+            "backend rejection cannot resurrect a Windows gesture already cancelled by the pinch");
+    record.resolverReasonNative = 0;
+    prepare(pinch::Phase::Pending, 0, false);
+    begin(); record.phase = static_cast<LONG>(pinch::Phase::Swipe); record.down = 1; startResult = E_FAIL;
+    move(); move(); end();
+    require(calls == "S" && record.pendingGestures == 0 && native_gate::states.empty(),
+            "failed deferred Start stays terminal until the native gesture ends");
+    prepare(pinch::Phase::Swipe);
+    begin(); continueResult = E_FAIL; move(); move(); end();
+    require(calls == "SCX" && native_gate::states.empty(), "failed Continue cancels once and cannot continue or finish afterward");
     std::cout << checks << " native shell checks passed; fake callbacks; desktop unchanged\n";
 }
