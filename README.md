@@ -4,7 +4,7 @@
 
 Un proyecto de **accesibilidad para Windows**, inspirada en el efecto de zoom de **KWin / KDE Plasma**. Permite ampliar todo el escritorio con un **pellizco de tres dedos**, usando el motor de la Lupa de Windows. Abre los dedos para acercar y ciérralos para alejar. Puedes alternarlo con **Win + «+» / «−»**, también en el teclado numérico.
 
-**0.3.2 experimental.** La prueba física en la máquina de desarrollo confirmó zoom fluido, alternancia con el teclado y puntero estable al mantener los tres dedos. La compatibilidad está acotada a la configuración indicada y sigue necesitando pruebas en otros equipos.
+**0.4.0 experimental, comprobada en el touchpad del equipo de desarrollo.** Incorpora cambio lateral directo, zoom global y suspensión al 100 % en multitarea/escritorio. Corrige rutas que podían provocar parpadeos y recolocar el puntero en pellizcos lentos. El usuario confirmó el pellizco lento, la alternancia con teclado y los gestos de ventanas. La compatibilidad con otros equipos sigue pendiente.
 
 Requiere Windows 11 x64, compilación **26200**, y Windhawk **1.7.3**. Los símbolos privados de Windows pueden cambiar con una actualización. El mod conserva la configuración de gestos del touchpad.
 
@@ -12,7 +12,11 @@ Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantall
 
 ## Comportamiento
 
-- Distingue el pellizco del movimiento de los tres dedos juntos. Los deslizamientos usan los controladores originales de multitarea de Windows. Ignora los gestos de dos y cuatro dedos.
+- Distingue el pellizco del movimiento de los tres dedos juntos. Los gestos de dos y cuatro dedos conservan su comportamiento.
+- Un deslizamiento horizontal de tres dedos cambia directamente de ventana, una por gesto, sin navegar por un selector: izquierda siguiente, derecha anterior. Es configurable. Filtra ventanas ocultas, auxiliares y cloaked, y conserva una secuencia para que los gestos sucesivos recorran más de dos ventanas.
+- Arriba/abajo conservan la acción de Windows. El inicio nativo mantiene su momento original cuando la información de contactos está disponible; un pellizco confirmado después cancela la acción provisional una sola vez.
+- El zoom es global: cambiar de ventana mantiene el nivel. **No hay perfiles de zoom por ventana.**
+- Task View y Mostrar escritorio se ven al 100 %. Al salir se restaura el nivel y la posición global anteriores. Las dos vistas pueden solaparse sin sobrescribir la instantánea. La opción se puede desactivar.
 - La interfaz nativa activa y cierra la ampliación; durante el pellizco, el controlador de pantalla completa recibe factores decimales continuos. Cada solicitud realiza una sola actualización y se descartan las basadas en un nivel anterior al teclado. Windows conserva las animaciones, los atajos y el seguimiento del ratón y del foco. El mod no bloquea las actualizaciones del motor nativo ni sustituye los atajos por una transformación propia.
 - El seguimiento del puntero y del foco lo controla Windows. Para mantener la vista en el ratón, usa **Configuración > Accesibilidad > Lupa > Vista**: activa el seguimiento del puntero y elige mantenerlo centrado. Si no quieres que el teclado, el texto o Narrador desplacen la vista, ajusta sus casillas de seguimiento. El mod conserva esos ajustes nativos.
 - La aceleración depende de la velocidad de separación de los dedos. Los movimientos lentos mantienen precisión; los rápidos reciben una ganancia adicional moderada. Los tiempos HID evitan confundir paquetes acumulados con un gesto rápido.
@@ -30,11 +34,13 @@ En la pestaña **Ajustes** del mod:
 - **Pinch activation threshold:** 3 % por defecto.
 - **Maximum zoom:** 0 por defecto, sin un tope adicional al de Windows.
 - **Keyboard zoom increment:** 0 mantiene el paso configurado en Windows. Un valor positivo lo personaliza.
+- **Switch windows directly with a horizontal three-finger swipe:** activado por defecto; desactívalo para conservar el selector lateral de Windows.
+- **Show Task View and desktop at 100 percent:** activado por defecto; conserva una única instantánea global para restaurarla al salir.
 - **Keep the pointer stationary during a pinch:** activado por defecto. Omite los reajustes sintéticos del cursor que hace la Lupa durante el pellizco, también al mantener los dedos. No bloquea el movimiento real del ratón ni los atajos nativos.
 - **Hide Windows Magnifier window and touch controls:** activado por defecto.
 - **Observe only:** reconoce sin aplicar zoom.
 
-El seguimiento del ratón, el teclado, el texto y Narrador se configura en la Lupa de Windows. `Smoothing` solo afecta al modo independiente de la API; el modo nativo conserva sus animaciones. Desactivar `Share zoom with Windows Magnifier shortcuts` habilita el modo experimental de API independiente y pierde la integración nativa; no es la opción recomendada.
+El seguimiento del ratón, el teclado, el texto y Narrador se configura en la Lupa de Windows. Durante Task View o Mostrar escritorio el zoom permanece temporalmente suspendido; los comandos de ampliación se reanudan al salir. `Smoothing` solo afecta al modo independiente de la API; el modo nativo conserva sus animaciones. Desactivar `Share zoom with Windows Magnifier shortcuts` habilita el modo experimental de API independiente y pierde la integración nativa; no es la opción recomendada.
 
 ## Instalación
 
@@ -66,7 +72,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 
 Para Windhawk portátil añade `-WindhawkPath 'D:\Herramientas\Windhawk'`. Se generan la DLL, el host de diagnóstico y las pruebas en `build/`. El script no instala ni activa mods, no inicia Windhawk y no cambia el zoom.
 
-La compilación ejecuta 48 pruebas del reconocedor, 21 del runtime/ABI y 27 del adaptador nativo con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
+La compilación ejecuta 52 pruebas del reconocedor, 21 del runtime/ABI, 44 del adaptador nativo y 18 del filtro de gestos del shell con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
 
 ```powershell
 .\build\native-integration.exe --live

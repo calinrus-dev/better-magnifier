@@ -4,14 +4,14 @@
 // @name:es-ES      Zoom accesible inspirado en KWin
 // @description     KWin-inspired accessibility: three-finger pinch for native Windows Magnifier
 // @description:es-ES Accesibilidad inspirada en KWin: pellizco de tres dedos para la Lupa nativa de Windows
-// @version         0.3.2
+// @version         0.4.0
 // @author          calinrus-dev
 // @github          https://github.com/calinrus-dev
 // @homepage        https://github.com/calinrus-dev/windhawk-kde-pinch-zoom
 // @include         explorer.exe
 // @include         magnify.exe
 // @architecture    amd64
-// @compilerOptions -DNOMINMAX -static -lhid -lwtsapi32 -lshell32 -ladvapi32
+// @compilerOptions -DNOMINMAX -static -lhid -lwtsapi32 -lshell32 -ladvapi32 -ldwmapi
 // @license         GPL-3.0-or-later
 // ==/WindhawkMod==
 
@@ -71,9 +71,15 @@ https://github.com/calinrus-dev/windhawk-kde-pinch-zoom
 - keyboardStep: 0
   $name: Keyboard zoom increment (%)
   $description: 0 keeps the increment configured in Windows Magnifier.
+- instantHorizontalSwitch: true
+  $name: Switch windows directly with a horizontal three-finger swipe
+  $description: Changes one window per swipe without opening the native app selector. Left selects next; right selects previous.
+- normalZoomInOverview: true
+  $name: Show Task View and desktop at 100 percent
+  $description: Temporarily suspends global zoom, then restores its previous level and position. No per-window zoom profiles.
 - keepPointerStable: true
   $name: Keep the pointer stationary during a pinch
-  $description: Prevents Magnifier's synthetic cursor warps while three-finger pinching. Real mouse movement and native keyboard zoom remain available.
+  $description: Keeps the pointer stable while pinching, including slow movements. Real mouse movement and native keyboard zoom remain available.
 - hideMagnifier: true
   $name: Hide Windows Magnifier window and touch controls
 - smoothing: 0
@@ -181,6 +187,8 @@ struct Config {
     bool invertPinch = false;
     bool keyboardInterop = true;
     bool hideMagnifier = true;
+    bool instantHorizontalSwitch = true;
+    bool normalZoomInOverview = true;
     int keyboardStep = 0;
     int mouseFollow = 0;  // edges, proportional, fixed
     double edgeMargin = 0.12;
@@ -221,10 +229,12 @@ class Recognizer {
     double velocity_ = 0;
     bool hasVelocity_ = false;
     std::uint64_t lastTime_ = 0;
+    Point movement_{};
 
 public:
     void reset() { phase_ = Phase::Idle; }
     Phase phase() const { return phase_; }
+    Point movement() const { return movement_; }
     void adoptZoom(double zoom) {
         if (std::isfinite(zoom) && zoom >= 1) zoom_ = zoom;
     }
@@ -266,6 +276,7 @@ public:
         if (phase_ == Phase::Idle || ids != ids_ || now - lastTime_ > 150) {
             ids_ = ids;
             start_ = center;
+            movement_ = {};
             radius_ = radius;
             zoom_ = std::isfinite(currentZoom) ? std::max(1.0, currentZoom) : 1.0;
             previousScale_ = 1;
@@ -288,7 +299,8 @@ public:
         }
         const double scaleDelta = std::log(scale / previousScale_);
         previousScale_ = scale;
-        const double travel = std::hypot(center.x - start_.x, center.y - start_.y);
+        movement_ = {center.x - start_.x, center.y - start_.y};
+        const double travel = std::hypot(movement_.x, movement_.y);
         const double spread = std::abs(radius - radius_);
         if (phase_ == Phase::Pending && travel > std::max(2.5, spread * 1.5)) {
             phase_ = Phase::Swipe;
@@ -353,10 +365,8 @@ class GestureGate {
 public:
     explicit GestureGate(Phase phase = Phase::Pending) { update(phase); }
     GateMode update(Phase phase) {
-        if (mode_ == GateMode::Pending) {
-            if (phase == Phase::Pinch) mode_ = GateMode::Suppress;
-            else if (phase == Phase::Swipe) mode_ = GateMode::Forward;
-        }
+        if (phase == Phase::Pinch) mode_ = GateMode::Suppress;
+        else if (mode_ == GateMode::Pending && phase == Phase::Swipe) mode_ = GateMode::Forward;
         return mode_;
     }
     GateMode finish(Phase phase) {
@@ -366,6 +376,29 @@ public:
     }
     GateMode mode() const { return mode_; }
 };
+// Stable order across repeated direct swipes, even though activation changes z-order.
+class WindowCycle {
+    std::vector<std::uintptr_t> order_;
+    std::uintptr_t last_ = 0;
+public:
+    std::uintptr_t next(const std::vector<std::uintptr_t>& available, std::uintptr_t current, int step) {
+        if (current != last_) order_ = available;
+        else {
+            std::erase_if(order_, [&](auto window) { return std::find(available.begin(), available.end(), window) == available.end(); });
+            for (auto window : available) if (std::find(order_.begin(), order_.end(), window) == order_.end()) order_.push_back(window);
+        }
+        if (order_.size() < 2) return 0;
+        const auto found = std::find(order_.begin(), order_.end(), current);
+        const int size = static_cast<int>(order_.size());
+        const int index = found == order_.end() ? (step > 0 ? -1 : 0) : static_cast<int>(found - order_.begin());
+        last_ = order_[static_cast<std::size_t>((index + step + size) % size)];
+        return last_;
+    }
+};
+inline int swipeDirection(Point movement) {
+    if (std::abs(movement.x) > std::abs(movement.y) * 1.25) return movement.x < 0 ? -1 : 1;
+    return movement.y < 0 ? -2 : 2;
+}
 inline View viewAt(double zoom, Point cursor, Desktop desktop) {
     if (!std::isfinite(zoom) || zoom <= 1 || desktop.width <= 0 || desktop.height <= 0) {
         return {};
@@ -393,6 +426,7 @@ inline double smooth(double current, double target, double elapsed, double durat
 #endif
 #include <windows.h>
 #include <hidsdi.h>
+#include <dwmapi.h>
 #include <hidpi.h>
 #include <shellapi.h>
 #include <wtsapi32.h>
@@ -408,8 +442,9 @@ inline double smooth(double current, double target, double elapsed, double durat
 #endif
 
 namespace bridge {
-constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v8";
-constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v8";
+inline volatile LONG* desktopRaised = nullptr;
+constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v9";
+constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v9";
 struct alignas(8) Record {
     volatile LONG phase;
     volatile LONG down;
@@ -437,6 +472,14 @@ struct alignas(8) Record {
     volatile LONG requestRevision;
     volatile LONG blockedCursorMoves;
     volatile LONG lastCursorOrigin;
+    volatile LONG instantSwitch;
+    volatile LONG normalInOverview;
+    volatile LONG swipeDirection;
+    volatile LONG shellMask;
+    volatile LONG shellRevision;
+    volatile LONG shellApplied;
+    volatile LONG pendingGestures;
+    volatile LONG blockedCursorClips;
 };
 class Mapping {
     HANDLE mapping_ = nullptr;
@@ -463,8 +506,8 @@ public:
 #ifdef PINCH_ZOOM_NATIVE_TEST
     void useTestRecord(Record* record) { record_ = record; testRecord_ = true; }
 #endif
-    bool magnifierAvailable() const {
-        if (!record_ || !InterlockedCompareExchange(&record_->magnifierReady, 0, 0)) return false;
+    bool magnifierProcessAlive() const {
+        if (!record_) return false;
         const auto pid = static_cast<DWORD>(InterlockedCompareExchange(&record_->magnifierPid, 0, 0));
         if (pid != magnifierPid_) {
             if (magnifierProcess_) CloseHandle(magnifierProcess_);
@@ -473,10 +516,20 @@ public:
         }
         return magnifierProcess_ && WaitForSingleObject(magnifierProcess_, 0) == WAIT_TIMEOUT;
     }
+    bool magnifierAvailable() const {
+        return record_ && InterlockedCompareExchange(&record_->magnifierReady, 0, 0) && magnifierProcessAlive();
+    }
+    void shellReason(LONG bit, bool visible) {
+        if (!record_) return;
+        const LONG previous = visible ? InterlockedOr(&record_->shellMask, bit) : InterlockedAnd(&record_->shellMask, ~bit);
+        if (((previous & bit) != 0) != visible) { InterlockedIncrement(&record_->shellRevision); wake(); }
+    }
     void configure(const pinch::Config& config) {
         if (!record_) return;
         InterlockedExchange(&record_->controlEnabled, config.enabled && !config.observeOnly && config.keyboardInterop ? 1 : 0);
         InterlockedExchange(&record_->hideUi, config.hideMagnifier ? 1 : 0);
+        InterlockedExchange(&record_->instantSwitch, config.instantHorizontalSwitch && config.enabled && !config.observeOnly ? 1 : 0);
+        InterlockedExchange(&record_->normalInOverview, config.normalZoomInOverview ? 1 : 0);
         InterlockedExchange(&record_->keyboardStep, config.keyboardStep);
         InterlockedExchange(&record_->maxZoomPercent, static_cast<LONG>(config.maxZoom * 100));
         if (!config.enabled || config.observeOnly) {
@@ -884,6 +937,7 @@ class Host {
     void ensureNativeMagnifier(std::uint64_t now) {
         if (!config_.enabled || config_.observeOnly || !config_.keyboardInterop || !sessionActive_) return;
         if (bridge_.magnifierAvailable()) { sawNative_ = true; nativeAttempts_ = 0; return; }
+        if (bridge_.magnifierProcessAlive()) return; // Renderer may be rebuilding after a native shortcut.
         if (sawNative_) {
             sawNative_ = false;
             nativeLaunchRequested_ = false;
@@ -1023,6 +1077,8 @@ class Host {
         const auto phase = decision.phase == pinch::Phase::Rejected ||
                            (decision.phase == pinch::Phase::Idle && dev.activeContacts == 3)
                                ? pinch::Phase::Swipe : decision.phase;
+        if (auto* record = bridge_.get()) InterlockedExchange(&record->swipeDirection,
+            phase == pinch::Phase::Swipe ? pinch::swipeDirection(dev.recognizer.movement()) : 0);
         bridge_.publish(phase, dev.activeContacts == 3, !config_.observeOnly);
         if (before == pinch::Phase::Pinch && decision.phase != pinch::Phase::Pinch) {
             zoom_.end();
@@ -1187,6 +1243,7 @@ class Host {
             case WM_TIMER: {
                 const auto now = GetTickCount64();
                 host->bridge_.heartbeat();
+                if (bridge::desktopRaised) host->bridge_.shellReason(2, InterlockedCompareExchange(bridge::desktopRaised, 0, 0) != 0);
                 host->ensureNativeMagnifier(now);
                 host->render(now);
                 if (host->config_.debug && now - host->lastDiagnostic_ >= 5000) {
@@ -1437,6 +1494,8 @@ int wmain(int argc, wchar_t** argv) {
             mapping.magnifierAvailable() ? "READY" : "NOT LOADED", record->magnifierPid,
             record->hideUi, record->nativeCommands, record->nativeError, inspector.rendered() * 100);
         std::printf("Pointer protection: blocked=%ld; lastOriginRva=0x%lx; threeFingersDown=%ld\n", record->blockedCursorMoves, static_cast<unsigned long>(record->lastCursorOrigin), record->down);
+        std::printf("Cursor clip protection: blocked=%ld\n", record->blockedCursorClips);
+        std::printf("Shell view: mask=%ld; applied=%ld/%ld; pendingGestures=%ld; instantSwitch=%ld; direction=%ld\n", record->shellMask, record->shellApplied, record->shellRevision, record->pendingGestures, record->instantSwitch, record->swipeDirection);
         return mapping.gateAvailable() ? 0 : 3;
     }
     if (reset) {
@@ -1500,6 +1559,8 @@ using Run = void(*)(void*);
 using SetLevel = void(*)(void*, long);
 using ZoomCommand = void(*)(void*, int);
 using MoveMouse = void(*)(void*, POINT);
+using MoveTo = void(*)(void*, const RECT*, bool);
+using ReadTransform = BOOL(WINAPI*)(float*, int*, int*);
 static_assert(sizeof(POINT) == 8, "Native CPoint ABI is an 8-byte value");
 using SetOption = void(*)(void*, int, long, bool);
 using GetOption = long(*)(void*, int);
@@ -1509,10 +1570,16 @@ Run originalRun = nullptr;
 SetLevel setLevel = nullptr;
 ZoomCommand originalZoomCommand = nullptr;
 MoveMouse originalMoveMouse = nullptr;
+decltype(&ClipCursor) originalClipCursor = nullptr;
+MoveTo moveTo = nullptr;
+ReadTransform readTransform = nullptr;
+std::atomic<bool> overviewSuspended{false};
+std::optional<pinch::View> overviewView;
 std::atomic<bool> keepPointerStable{true};
 std::atomic<void*> nativeUi{nullptr};
 std::atomic<bool> trackingInitialized{false};
 std::atomic<DWORD> rendererThread{0};
+std::atomic<unsigned> rendererGeneration{0};
 SetOption originalOption = nullptr;
 GetOption getOption = nullptr;
 GetKeeper getKeeper = nullptr;
@@ -1530,18 +1597,23 @@ HANDLE thread = nullptr;
 std::atomic<HWND> messageWindow{nullptr};
 std::atomic<bool> stopping{false};
 std::atomic<unsigned> activeUpdates{0};
-constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v8";
+constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v9";
 std::atomic<DWORD> uiThread{0};
 std::atomic<void*> nativeSelf{nullptr}; // Dereferenced only on the native rendering thread.
 thread_local bool applyingPinch = false;
 thread_local unsigned nativeCommandDepth = 0;
-const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v8");
+const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v9");
 LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l);
 void publish(float level) {
     if (mapping.get()) InterlockedExchange(&mapping.get()->nativeLevel, static_cast<LONG>(std::lround(level * 10000)));
 }
-void run(void* self) {
+void ensureUi(void* self) {
+    if (!self) return;
     nativeUi.store(self);
+    if (messageWindow) return;
+#ifdef PINCH_ZOOM_NATIVE_TEST
+    return;
+#else
     HMODULE module = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                       reinterpret_cast<LPCWSTR>(&messages), &module);
@@ -1556,11 +1628,16 @@ void run(void* self) {
             if (nativeSelf) InterlockedExchange(&mapping.get()->magnifierReady, 1);
         }
     }
+#endif
+}
+void run(void* self) {
+    ensureUi(self);
     // Run owns the message loop. Tail-call it so no mod return address remains
     // on the UI stack when Windhawk later unloads this DLL.
     [[clang::musttail]] return originalRun(self);
 }
 void change(void* self, float level, POINT* point) {
+    if (overviewSuspended.load() && !applyingPinch) { level = 1; point = nullptr; }
     rendererThread.store(GetCurrentThreadId());
     nativeSelf = self;
     if (InterlockedExchange(&mapping.get()->startAtNormal, 0)) {
@@ -1574,9 +1651,16 @@ void change(void* self, float level, POINT* point) {
         level = 1;
         point = nullptr;
     }
+    const LONG before = mapping.get()->nativeLevel;
     originalChange(self, level, point); // Preserve all native animations and focus tracking.
     publish(level);
-    if (messageWindow) InterlockedExchange(&mapping.get()->magnifierReady, 1);
+    rendererGeneration.fetch_add(1);
+    if (!applyingPinch && std::abs(level * 10000.0 - before) >= 1) {
+        InterlockedExchange(&mapping.get()->appliedSequence, mapping.get()->requestedSequence);
+        InterlockedIncrement(&mapping.get()->zoomRevision);
+        trackingInitialized.store(level > 1);
+    }
+    if (messageWindow && nativeSelf) InterlockedExchange(&mapping.get()->magnifierReady, 1);
 }
 long readOption(void* self, int name) {
     if (name == 20 && mapping.get() && mapping.get()->keyboardStep > 0)
@@ -1603,30 +1687,44 @@ void moveMouse(void* self, POINT point) {
     }
     originalMoveMouse(self, point);
 }
+BOOL WINAPI clipCursor(const RECT* rectangle) {
+    if (rectangle && holdPointer()) {
+        if (auto* state = mapping.get()) InterlockedIncrement(&state->blockedCursorClips);
+        // ClipCursor can itself relocate the pointer when its shrinking bounds
+        // exclude the current pixel. Releasing it does not inject mouse movement.
+        return originalClipCursor(nullptr);
+    }
+    return originalClipCursor(rectangle);
+}
 struct NativeCommandScope {
     bool previous = applyingPinch;
+    unsigned rendererBefore = rendererGeneration.load();
     NativeCommandScope() { ++nativeCommandDepth; applyingPinch = false; }
     ~NativeCommandScope() { applyingPinch = previous; --nativeCommandDepth; }
 };
-void nativeCommandComplete(void*) {
+void nativeCommandComplete(unsigned rendererBefore) {
     if (applyingPinch) return;
     void* keeper = nullptr;
     if (FAILED(getKeeper(&keeper)) || !keeper) return;
-    publish(getOption(keeper, 14) / 100.0f);
+    if (rendererGeneration.load() == rendererBefore) publish(getOption(keeper, 14) / 100.0f);
     InterlockedExchange(&mapping.get()->appliedSequence, mapping.get()->requestedSequence);
     InterlockedIncrement(&mapping.get()->nativeCommands);
     InterlockedIncrement(&mapping.get()->zoomRevision);
     trackingInitialized.store(mapping.get()->nativeLevel > 10000);
 }
 void uiLevel(void* self, long level) {
+    ensureUi(self);
+    if (overviewSuspended.load()) return;
     NativeCommandScope scope;
     setLevel(self, level);
-    nativeCommandComplete(self);
+    nativeCommandComplete(scope.rendererBefore);
 }
 void zoomCommand(void* self, int command) {
+    ensureUi(self);
+    if (overviewSuspended.load()) return;
     NativeCommandScope scope;
     originalZoomCommand(self, command);
-    nativeCommandComplete(self);
+    nativeCommandComplete(scope.rendererBefore);
 }
 void option(void* self, int name, long value, bool save) {
     if (applyingPinch) save = false; // No registry writes for every HID frame.
@@ -1637,6 +1735,47 @@ void option(void* self, int name, long value, bool save) {
         InterlockedExchange(&mapping.get()->magnifierReady, 0);
         nativeSelf = nullptr;
     }
+}
+bool updateOverview() {
+    auto* state = mapping.get();
+    const bool suspend = state->controlEnabled && state->normalInOverview && state->shellMask != 0 && (overviewSuspended.load() || !state->pendingGestures);
+    if (suspend == overviewSuspended.load()) { state->shellApplied = state->shellRevision; return true; }
+    if (!nativeSelf || !readTransform || !moveTo || rendererThread.load() != GetCurrentThreadId()) return false;
+    void* keeper = nullptr;
+    if (FAILED(getKeeper(&keeper)) || !keeper) return false;
+    float zoom = 1; int x = 0, y = 0;
+    if (suspend && !readTransform(&zoom, &x, &y)) return false;
+    const bool previous = applyingPinch;
+    applyingPinch = true;
+    if (keepPointerStable.load() && originalClipCursor) originalClipCursor(nullptr);
+    if (suspend) {
+        overviewView = pinch::View{zoom, x, y};
+        overviewSuspended.store(true);
+        originalOption(keeper, 14, 100, false);
+        originalChange(nativeSelf, 1, nullptr);
+        publish(1);
+    } else {
+        const auto saved = overviewView.value_or(pinch::View{});
+        overviewSuspended.store(false);
+        originalOption(keeper, 14, static_cast<long>(std::lround(saved.zoom * 100)), false);
+        originalChange(nativeSelf, static_cast<float>(saved.zoom), nullptr);
+        if (saved.zoom > 1) {
+            const int width = std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
+            const int height = std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+            alignas(16) RECT rectangle{saved.x, saved.y,
+                saved.x + static_cast<LONG>(std::lround(width / saved.zoom)),
+                saved.y + static_cast<LONG>(std::lround(height / saved.zoom))};
+            moveTo(nativeSelf, &rectangle, true);
+        }
+        publish(static_cast<float>(saved.zoom));
+        trackingInitialized.store(saved.zoom > 1);
+        overviewView.reset();
+    }
+    applyingPinch = previous;
+    InterlockedExchange(&state->appliedSequence, state->requestedSequence);
+    InterlockedIncrement(&state->zoomRevision);
+    InterlockedExchange(&state->shellApplied, state->shellRevision);
+    return true;
 }
 LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
     if (message == WM_CLOSE) {
@@ -1652,6 +1791,12 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
             ~ActiveUpdate() { activeUpdates.fetch_sub(1); }
         } active;
         auto* state = mapping.get();
+        if (w == 1) { updateOverview(); return 0; }
+        if (overviewSuspended.load()) {
+            InterlockedExchange(&state->appliedSequence, state->requestedSequence);
+            InterlockedExchange(&state->pendingCommand, 0);
+            return 0;
+        }
         const LONG sequence = InterlockedCompareExchange(&state->requestedSequence, 0, 0);
         const LONG action = InterlockedExchange(&state->pendingCommand, 0);
         void* keeper = nullptr;
@@ -1678,6 +1823,7 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
             double delivered = level;
             if (prime || reset || std::abs(level - previous) >= 0.00005) {
                 applyingPinch = true;
+                if (keepPointerStable.load() && originalClipCursor) originalClipCursor(nullptr);
                 long percent = static_cast<long>(std::lround(level * 100));
                 if (prime) percent = std::max(101L, percent);
                 originalOption(keeper, 14, percent, false);
@@ -1778,6 +1924,9 @@ DWORD WINAPI worker(void*) {
         const LONG sequence = InterlockedCompareExchange(&state->requestedSequence, 0, 0);
         const LONG command = InterlockedCompareExchange(&state->syncRequest, 0, 0);
         const HWND target = messageWindow.load();
+        const bool shouldSuspend = state->controlEnabled && state->normalInOverview && state->shellMask != 0 && (overviewSuspended.load() || !state->pendingGestures);
+        if (target && (state->shellApplied != state->shellRevision || shouldSuspend != overviewSuspended.load()))
+            PostMessageW(target, updateMessage, 1, 0);
         // Coalesce pending HID updates; process them on Windows' own UI thread.
         if (target && (sequence != last || command != lastCommand)) {
             if (((sequence != last && sequence) || state->pendingCommand) && PostMessageW(target, updateMessage, 0, 0)) {
@@ -1792,7 +1941,7 @@ bool initialize() {
     if (!mapping.open()) return false;
     hiding.store(Wh_GetIntSetting(L"hideMagnifier") != 0);
     keepPointerStable.store(Wh_GetIntSetting(L"keepPointerStable") != 0);
-    void* targets[8]{};
+    void* targets[9]{};
     WH_FIND_SYMBOL symbol{};
     const HANDLE search = Wh_FindFirstSymbol(GetModuleHandleW(nullptr), nullptr, &symbol);
     if (!search) return false;
@@ -1805,10 +1954,16 @@ bool initialize() {
         if (wcsstr(symbol.symbol, L"MagnifierUI::HandleSetZoomLevel(")) targets[5] = symbol.address;
         if (wcsstr(symbol.symbol, L"MagnifierUI::HandleZoomCommand(")) targets[6] = symbol.address;
         if (wcsstr(symbol.symbol, L" Magnifier::MoveMouse(")) targets[7] = symbol.address;
+        if (wcsstr(symbol.symbol, L"FullscreenMagnifier::MoveTo(")) targets[8] = symbol.address;
         if (std::all_of(std::begin(targets), std::end(targets), [](void* target) { return target != nullptr; })) break;
     } while (Wh_FindNextSymbol(search, &symbol));
     Wh_FindCloseSymbol(search);
     for (auto target : targets) if (!target) { Wh_Log(L"Native Magnifier symbols unavailable."); return false; }
+    moveTo = reinterpret_cast<MoveTo>(targets[8]);
+    const auto api = LoadLibraryExW(L"Magnification.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!api) return false;
+    readTransform = reinterpret_cast<ReadTransform>(GetProcAddress(api, "MagGetFullscreenTransform"));
+    if (!readTransform) return false;
     getOption = reinterpret_cast<GetOption>(targets[2]);
     getKeeper = reinterpret_cast<GetKeeper>(targets[3]);
     role = true;
@@ -1816,6 +1971,7 @@ bool initialize() {
         Wh_SetFunctionHook(targets[5], reinterpret_cast<void*>(uiLevel), reinterpret_cast<void**>(&setLevel)) &&
         Wh_SetFunctionHook(targets[6], reinterpret_cast<void*>(zoomCommand), reinterpret_cast<void**>(&originalZoomCommand)) &&
         Wh_SetFunctionHook(targets[7], reinterpret_cast<void*>(moveMouse), reinterpret_cast<void**>(&originalMoveMouse)) &&
+        Wh_SetFunctionHook(reinterpret_cast<void*>(ClipCursor), reinterpret_cast<void*>(clipCursor), reinterpret_cast<void**>(&originalClipCursor)) &&
         Wh_SetFunctionHook(targets[0], reinterpret_cast<void*>(change), reinterpret_cast<void**>(&originalChange)) &&
         Wh_SetFunctionHook(targets[1], reinterpret_cast<void*>(option), reinterpret_cast<void**>(&originalOption)) &&
         Wh_SetFunctionHook(targets[2], reinterpret_cast<void*>(readOption), reinterpret_cast<void**>(&getOption)) &&
@@ -1827,7 +1983,8 @@ bool initialize() {
 #endif
 void afterInit() {
     InterlockedExchange(&mapping.get()->magnifierPid, static_cast<LONG>(GetCurrentProcessId()));
-    InterlockedExchange(&mapping.get()->magnifierReady, 0);
+    InterlockedExchange(&mapping.get()->magnifierReady, messageWindow && nativeSelf ? 1 : 0);
+    InterlockedIncrement(&mapping.get()->zoomRevision);
     InterlockedExchange(&mapping.get()->appliedSequence, mapping.get()->requestedSequence);
     InterlockedExchange(&mapping.get()->pendingCommand, 0);
     EnumWindows(visibility, 0);
@@ -1868,7 +2025,7 @@ void stop() {
 }
 }  // namespace magnifier
 
-#ifndef PINCH_ZOOM_NATIVE_TEST
+#if !defined(PINCH_ZOOM_NATIVE_TEST) || defined(PINCH_ZOOM_GATE_TEST)
 namespace native_gate {
 
 // ABI verified against Microsoft public symbols for Windows 11 build 26200.
@@ -1885,96 +2042,183 @@ Cancel originalCancel = nullptr;
 bridge::Mapping mapping;
 bool shell = false;
 std::mutex mutex;
+class WindowSwitcher {
+    pinch::WindowCycle cycle_;
+    static BOOL CALLBACK collect(HWND window, LPARAM parameter) {
+        if (!IsWindowVisible(window) || !IsWindowEnabled(window)) return TRUE;
+        const LONG_PTR style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+        if (style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) return TRUE;
+        if (window == GetShellWindow() || window == GetDesktopWindow()) return TRUE;
+        wchar_t name[96]{};
+        GetClassNameW(window, name, ARRAYSIZE(name));
+        for (const auto* excluded : {L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd", L"Progman", L"WorkerW", L"XamlExplorerHostIslandWindow"})
+            if (wcscmp(name, excluded) == 0) return TRUE;
+        DWORD cloaked = 0;
+        if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) return TRUE;
+        if (!(style & WS_EX_APPWINDOW)) {
+            HWND walk = GetAncestor(window, GA_ROOTOWNER);
+            for (unsigned i = 0; walk && i < 32; ++i) {
+                HWND popup = GetLastActivePopup(walk);
+                if (!popup || popup == walk) break;
+                walk = popup;
+                if (IsWindowVisible(walk)) break;
+            }
+            if (walk && walk != window) return TRUE;
+        }
+        auto& windows = *reinterpret_cast<std::vector<std::uintptr_t>*>(parameter);
+        windows.push_back(reinterpret_cast<std::uintptr_t>(window));
+        return TRUE;
+    }
+public:
+    bool activate(int direction) {
+        std::vector<std::uintptr_t> windows;
+        EnumWindows(collect, reinterpret_cast<LPARAM>(&windows));
+        HWND current = GetAncestor(GetForegroundWindow(), GA_ROOT);
+        HWND target = reinterpret_cast<HWND>(cycle_.next(windows, reinterpret_cast<std::uintptr_t>(current), direction < 0 ? 1 : -1));
+        if (!target || target == current || !IsWindow(target)) return false;
+        if (IsIconic(target)) ShowWindowAsync(target, SW_RESTORE);
+        SwitchToThisWindow(target, TRUE);
+        return GetAncestor(GetForegroundWindow(), GA_ROOT) == target;
+    }
+};
+WindowSwitcher switcher;
+bool activateWindow(int direction) { return switcher.activate(direction); }
+bool (*switchWindow)(int) = activateWindow;
+decltype(&GetPointerFrameInfo) readPointerFrame = GetPointerFrameInfo;
 struct State {
     pinch::GestureGate gate{pinch::Phase::Pending};
-    int x;
-    int y;
-    unsigned device;
-    Context context;
     bool started = false;
-    bool sawContacts = false;
+    bool cancelled = false;
+    bool classify = false;
+    bool mayClassify = true;
+    bool direct = false;
+    bool pending = false;
+    int x = 0, y = 0;
+    unsigned device = 0;
+    Context context{};
 };
 std::map<void*, State> states;
-
+void pendingChange(int delta) {
+    if (delta) if (auto* record = mapping.get()) { InterlockedExchangeAdd(&record->pendingGestures, delta); mapping.wake(); }
+}
+bool directSwipe(pinch::Phase phase) {
+    auto* record = mapping.get();
+    return phase == pinch::Phase::Swipe && record && record->instantSwitch && std::abs(record->swipeDirection) == 1;
+}
 HRESULT start(void* self, int x, int y, unsigned device, Context context) {
-    // The third argument is the native pointer id (the original handler uses
-    // GetPointerInfo on it). Four-finger gestures must bypass the gate entirely.
     UINT32 contacts = 0;
-    GetPointerFrameInfo(device, &contacts, nullptr);
-    const auto phase = contacts == 3 ? mapping.phase() : pinch::Phase::Swipe;
-    State state{pinch::GestureGate(phase), x, y, device, context};
-    state.sawContacts = mapping.threeContacts();
-    if (auto* record = mapping.get()) InterlockedExchange(&record->reserved,
-        static_cast<LONG>(contacts | (static_cast<unsigned>(state.gate.mode()) << 8)));
-    state.started = state.gate.mode() == pinch::GateMode::Forward;
+    readPointerFrame(device, &contacts, nullptr);
+    // Raw HID is authoritative for a three-finger pinch when the pointer-frame
+    // query is temporarily empty. An explicit four-finger frame always bypasses.
+    const bool classify = contacts < 4 && mapping.get() && mapping.get()->enabled && GetTickCount64() - mapping.get()->heartbeat < 250;
+    const auto phase = classify ? mapping.phase() : pinch::Phase::Swipe;
+    State state;
+    state.x = x; state.y = y; state.device = device; state.context = context;
+    state.classify = classify;
+    state.mayClassify = contacts < 4;
+    state.gate.update(phase);
+    state.direct = classify && directSwipe(phase);
+    state.started = !state.direct && state.gate.mode() != pinch::GateMode::Suppress && !(contacts == 0 && phase == pinch::Phase::Pending);
+    state.pending = state.classify && state.gate.mode() == pinch::GateMode::Pending;
     {
         std::lock_guard lock(mutex);
+        const auto previous = states.find(self);
+        pendingChange((state.pending ? 1 : 0) - (previous != states.end() && previous->second.pending ? 1 : 0));
         states.insert_or_assign(self, state);
     }
-    return state.started ? originalStart(self, x, y, device, context) : S_OK;
+    if (auto* record = mapping.get()) InterlockedExchange(&record->reserved,
+        static_cast<LONG>(contacts | (static_cast<unsigned>(state.gate.mode()) << 8)));
+    if (state.direct) { switchWindow(mapping.get()->swipeDirection); return S_OK; }
+    // Start at the real beginning: delayed/replayed StartSwipe changes the
+    // desktop/task-view state from which Windows builds its animation.
+    const HRESULT result = state.started ? originalStart(self, x, y, device, context) : S_OK;
+    if (FAILED(result)) { std::lock_guard lock(mutex); if (state.pending) pendingChange(-1); states.erase(self); }
+    return result;
 }
-
 HRESULT continueSwipe(void* self, int x, int y, int dx, int dy, unsigned device) {
-    State state{};
-    bool deferredStart = false;
-    bool tracked = false;
+    UINT32 contacts = 0;
+    readPointerFrame(device, &contacts, nullptr);
+    State state;
+    bool tracked = false, cancelNow = false, switchNow = false, endPending = false, beginNow = false, uncertain = false;
+    int direction = 0;
     {
         std::lock_guard lock(mutex);
         if (const auto found = states.find(self); found != states.end()) {
             tracked = true;
             auto& current = found->second;
-            current.sawContacts = current.sawContacts || mapping.threeContacts();
-            if (current.gate.update(mapping.phase()) == pinch::GateMode::Forward) {
-                deferredStart = !current.started;
+            if (contacts >= 4) { current.classify = false; current.mayClassify = false; current.gate = pinch::GestureGate(pinch::Phase::Swipe); }
+            if (!current.classify && current.mayClassify && mapping.threeContacts()) current.classify = true;
+            const auto phase = current.classify ? mapping.phase() : pinch::Phase::Swipe;
+            current.gate.update(phase);
+            uncertain = current.classify && phase == pinch::Phase::Pending;
+            if (current.pending && current.gate.mode() != pinch::GateMode::Pending) { current.pending = false; endPending = true; }
+            if (!current.direct && current.classify && directSwipe(phase)) {
+                current.direct = true;
+                switchNow = true;
+                direction = mapping.get()->swipeDirection;
+            }
+            if ((current.direct || current.gate.mode() == pinch::GateMode::Suppress) && current.started && !current.cancelled) {
+                current.cancelled = true;
+                cancelNow = true;
+            }
+            if (!current.started && !current.direct && current.gate.mode() == pinch::GateMode::Forward && !uncertain) {
                 current.started = true;
+                beginNow = true;
             }
             state = current;
             if (auto* record = mapping.get()) {
-                const LONG contactBits = InterlockedCompareExchange(&record->reserved, 0, 0) & 0xFF;
-                InterlockedExchange(&record->reserved, contactBits | (static_cast<LONG>(current.gate.mode()) << 8));
+                const LONG previous = InterlockedCompareExchange(&record->reserved, 0, 0);
+                InterlockedExchange(&record->reserved, (previous & 0xFF) | (static_cast<LONG>(current.gate.mode()) << 8) | (current.direct ? 0x10000 : 0));
             }
         }
     }
     if (!tracked) return originalContinue(self, x, y, dx, dy, device);
-    if (!state.started) return S_OK;
-    if (deferredStart) {
-        const HRESULT result = originalStart(self, state.x, state.y, state.device, state.context);
-        if (FAILED(result)) return result;
-    }
+    if (cancelNow) originalCancel(self);
+    if (endPending) pendingChange(-1);
+    if (switchNow) switchWindow(direction);
+    if (beginNow) { const HRESULT result = originalStart(self, state.x, state.y, state.device, state.context); if (FAILED(result)) return result; }
+    if (uncertain) return S_OK;
+    if (state.direct || state.gate.mode() != pinch::GateMode::Forward) return S_OK;
     return originalContinue(self, x, y, dx, dy, device);
 }
-
 HRESULT finish(void* self, int x, int y, int dx, int dy, unsigned device) {
     std::optional<State> state;
     {
         std::lock_guard lock(mutex);
-        if (const auto found = states.find(self); found != states.end()) {
-            state = found->second;
-            states.erase(found);
-        }
+        if (const auto found = states.find(self); found != states.end()) { state = found->second; states.erase(found); }
     }
     if (!state) return originalFinish(self, x, y, dx, dy, device);
-    const auto finalPhase = state->sawContacts || mapping.threeContacts() ? mapping.phase(true) : pinch::Phase::Swipe;
-    if (state->gate.finish(finalPhase) == pinch::GateMode::Suppress) return S_OK;
-    if (!state->started) {
-        const HRESULT result = originalStart(self, state->x, state->y, state->device, state->context);
-        if (FAILED(result)) return result;
+    const auto phase = state->classify ? mapping.phase(true) : pinch::Phase::Swipe;
+    if (state->direct || state->gate.finish(phase) == pinch::GateMode::Suppress) {
+        if (state->started && !state->cancelled) originalCancel(self);
+        if (state->pending) pendingChange(-1);
+        return S_OK;
     }
-    return originalFinish(self, x, y, dx, dy, device);
+    const HRESULT result = state->started ? originalFinish(self, x, y, dx, dy, device) : S_OK;
+    if (state->pending) pendingChange(-1);
+    return result;
 }
-
 HRESULT cancel(void* self) {
     std::optional<State> state;
     {
         std::lock_guard lock(mutex);
-        if (const auto found = states.find(self); found != states.end()) {
-            state = found->second;
-            states.erase(found);
-        }
+        if (const auto found = states.find(self); found != states.end()) { state = found->second; states.erase(found); }
     }
-    return !state || state->started ? originalCancel(self) : S_OK;
+    const HRESULT result = !state || (state->started && !state->cancelled) ? originalCancel(self) : S_OK;
+    if (state && state->pending) pendingChange(-1);
+    return result;
 }
-
+using Visibility = void(*)(void*, int);
+Visibility originalShown = nullptr, originalDismissed = nullptr;
+void shown(void* self, int type) {
+    if (type & 2) mapping.shellReason(1, true);
+    originalShown(self, type);
+}
+void dismissed(void* self, int type) {
+    originalDismissed(self, type);
+    if (type & 2) mapping.shellReason(1, false);
+}
+#ifndef PINCH_ZOOM_GATE_TEST
 bool initialize() {
     using GetVersion = LONG(WINAPI*)(OSVERSIONINFOW*);
     const auto getVersion = reinterpret_cast<GetVersion>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
@@ -1990,13 +2234,15 @@ bool initialize() {
         L"MultitaskingViewGestureHandler::StartSwipe(",
         L"MultitaskingViewGestureHandler::ContinueSwipe(",
         L"MultitaskingViewGestureHandler::FinishSwipe(",
-        L"MultitaskingViewGestureHandler::CancelSwipe("};
-    void* targets[4]{};
+        L"MultitaskingViewGestureHandler::CancelSwipe(",
+        L"MultitaskingViewVisibilityService::ViewShown(",
+        L"MultitaskingViewVisibilityService::ViewDismissed("};
+    void* targets[6]{};
     WH_FIND_SYMBOL symbol{};
     const HANDLE search = Wh_FindFirstSymbol(module, nullptr, &symbol);
     if (!search) return false;
     do {
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 6; ++i) {
             if (std::wcsstr(symbol.symbol, names[i])) targets[i] = symbol.address;
         }
     } while (Wh_FindNextSymbol(search, &symbol));
@@ -2007,11 +2253,20 @@ bool initialize() {
             return false;
         }
     }
+    const HANDLE explorerSymbols = Wh_FindFirstSymbol(GetModuleHandleW(nullptr), nullptr, &symbol);
+    if (explorerSymbols) {
+        do {
+            if (std::wcsstr(symbol.symbol, L"g_fDesktopRaised")) { bridge::desktopRaised = static_cast<volatile LONG*>(symbol.address); break; }
+        } while (Wh_FindNextSymbol(explorerSymbols, &symbol));
+        Wh_FindCloseSymbol(explorerSymbols);
+    }
     shell = true;
     return Wh_SetFunctionHook(targets[0], reinterpret_cast<void*>(start), reinterpret_cast<void**>(&originalStart)) &&
            Wh_SetFunctionHook(targets[1], reinterpret_cast<void*>(continueSwipe), reinterpret_cast<void**>(&originalContinue)) &&
            Wh_SetFunctionHook(targets[2], reinterpret_cast<void*>(finish), reinterpret_cast<void**>(&originalFinish)) &&
-           Wh_SetFunctionHook(targets[3], reinterpret_cast<void*>(cancel), reinterpret_cast<void**>(&originalCancel));
+           Wh_SetFunctionHook(targets[3], reinterpret_cast<void*>(cancel), reinterpret_cast<void**>(&originalCancel)) &&
+           Wh_SetFunctionHook(targets[4], reinterpret_cast<void*>(shown), reinterpret_cast<void**>(&originalShown)) &&
+           Wh_SetFunctionHook(targets[5], reinterpret_cast<void*>(dismissed), reinterpret_cast<void**>(&originalDismissed));
 }
 void ready() {
     if (auto* record = mapping.get()) {
@@ -2023,8 +2278,10 @@ void ready() {
 void stop() {
     if (auto* record = mapping.get()) InterlockedExchange(&record->gateReady, 0);
 }
+#endif  // PINCH_ZOOM_GATE_TEST
 }  // namespace native_gate
 
+#ifndef PINCH_ZOOM_GATE_TEST
 namespace controller {
 HANDLE stopEvent = nullptr;
 HANDLE thread = nullptr;
@@ -2043,6 +2300,8 @@ pinch::Config settings() {
     config.maxZoom = pinch::maximumZoom(Wh_GetIntSetting(L"maxZoom"));
     config.keyboardInterop = Wh_GetIntSetting(L"keyboardInterop") != 0;
     config.hideMagnifier = Wh_GetIntSetting(L"hideMagnifier") != 0;
+    config.instantHorizontalSwitch = Wh_GetIntSetting(L"instantHorizontalSwitch") != 0;
+    config.normalZoomInOverview = Wh_GetIntSetting(L"normalZoomInOverview") != 0;
     config.keyboardStep = std::clamp(Wh_GetIntSetting(L"keyboardStep"), 0, 1000);
     config.edgeMargin = std::clamp(Wh_GetIntSetting(L"edgeMargin"), 0, 40) / 100.0;
     const auto follow = Wh_GetStringSetting(L"mouseFollow");
@@ -2133,6 +2392,7 @@ void Wh_ModUninit() {
     controller::stop();
 }
 
+#endif  // PINCH_ZOOM_GATE_TEST
 #endif  // PINCH_ZOOM_NATIVE_TEST
 #endif  // Native adapter or Windhawk
 #endif  // PINCH_ZOOM_CORE_TEST

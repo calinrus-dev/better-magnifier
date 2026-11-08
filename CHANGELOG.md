@@ -1,5 +1,14 @@
 # Cambios
 
+## 0.4.0 — 2026-11-08 (experimental)
+
+- Cambio directo de ventana con los deslizamientos laterales, configurable, una ventana por gesto y sin perfiles de zoom por ventana.
+- Zoom global al cambiar de ventana. Task View y Mostrar escritorio se muestran temporalmente al 100 %, restaurando nivel y posición cuando se cierra la última de esas vistas.
+- Corrección del inicio tardío/repetido del gesto nativo, cancelación única de un pellizco confirmado tarde e inicios con información provisional de contactos.
+- La reconstrucción temporal del renderizador ya no se trata como cierre de la Lupa. Los cambios nativos del factor también rebasan el pellizco aunque no atraviesen los controles de interfaz.
+- La protección del puntero cubre ClipCursor, que puede recolocarlo sin emitir un movimiento sintético. Se verifica el caso del pellizco lento y se conserva el comportamiento del teclado.
+- 135 comprobaciones automáticas, incluyendo callbacks reales con backend simulado. Instalada localmente con ambos componentes READY. El usuario confirmó pellizco lento, teclado, deslizamientos y restauración del zoom en este equipo.
+
 ## 0.3.2 — 2026-11-08 (experimental)
 
 - Protección configurable del puntero, activada por defecto: evita los movimientos sintéticos de la Lupa durante el pellizco y mientras se mantienen tres dedos apoyados.

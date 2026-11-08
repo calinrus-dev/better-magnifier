@@ -7,3 +7,5 @@
 - Las pruebas sintéticas no demuestran compatibilidad con un touchpad físico. Documenta por separado las comprobaciones realizadas en hardware.
 - No habilites el mod ni inicies otro Windhawk automáticamente desde scripts de compilación.
 - El usuario ha autorizado integrar `magnifier-headless`: el instalador puede desactivar ese mod antiguo, conservándolo instalado, para evitar dos hooks de ocultación simultáneos. No modifiques otros mods.
+
+- El usuario autorizó el cambio lateral directo de ventana: se puede interceptar ese deslizamiento, sin escribir la configuración de gestos de Windows. Arriba/abajo y cuatro dedos conservan sus acciones nativas. El zoom sigue siendo global, sin perfiles por ventana.

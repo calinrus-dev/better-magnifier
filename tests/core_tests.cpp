@@ -247,10 +247,10 @@ int main() {
         require(gate.update(pinch::Phase::Swipe) == pinch::GateMode::Suppress, "pinch changed into native swipe");
         require(gate.finish(pinch::Phase::Idle) == pinch::GateMode::Suppress, "finger lift activated native swipe");
     });
-    test("native swipes remain forwarded after recognition", [] {
+    test("an authoritative late pinch cancels an early native swipe classification", [] {
         pinch::GestureGate gate;
         require(gate.update(pinch::Phase::Swipe) == pinch::GateMode::Forward, "native swipe blocked");
-        require(gate.update(pinch::Phase::Pinch) == pinch::GateMode::Forward, "native swipe changed mid-gesture");
+        require(gate.update(pinch::Phase::Pinch) == pinch::GateMode::Suppress, "late pinch leaked into native multitasking");
     });
     test("a short undecided native swipe is forwarded on release", [] {
         pinch::GestureGate gate;
@@ -352,6 +352,29 @@ int main() {
         }
         const double previous = 1.05 + 8 * 0.04;
         near(*r.update(fingers(previous * 1.01), 160, 1, config).zoom, 1.01);
+    });
+    test("direct window swipes keep a stable cycle despite activation changing z-order", [] {
+        pinch::WindowCycle cycle;
+        require(cycle.next({1, 2, 3}, 1, 1) == 2, "first next window");
+        require(cycle.next({2, 1, 3}, 2, 1) == 3, "cycle collapsed to last two windows");
+        require(cycle.next({3, 2, 1}, 3, -1) == 2, "reverse window direction");
+    });
+    test("external window activation resets the direct swipe order", [] {
+        pinch::WindowCycle cycle;
+        cycle.next({1, 2, 3}, 1, 1);
+        require(cycle.next({3, 1, 2}, 3, 1) == 1, "external activation ignored");
+    });
+    test("closed windows are removed from the direct swipe cycle", [] {
+        pinch::WindowCycle cycle;
+        cycle.next({1, 2, 3}, 1, 1);
+        require(cycle.next({2, 1}, 2, 1) == 1, "closed window remained selectable");
+        require(cycle.next({1}, 1, 1) == 0, "single window should not be switched");
+    });
+    test("swipe direction separates vertical multitasking from direct lateral switching", [] {
+        require(pinch::swipeDirection({-4, 0.5}) == -1, "left direction");
+        require(pinch::swipeDirection({4, 0.5}) == 1, "right direction");
+        require(pinch::swipeDirection({0.5, -4}) == -2, "up was interpreted as lateral");
+        require(pinch::swipeDirection({0.5, 4}) == 2, "down was interpreted as lateral");
     });
     std::cout << passed << " tests passed\n";
 }

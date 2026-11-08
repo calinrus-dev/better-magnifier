@@ -1,8 +1,23 @@
 # Validación
 
-Fecha de 0.3.2: 8 de noviembre de 2026.
+Fecha de revisión: 8 de noviembre de 2026.
 
-## Estado de 0.3.2
+## Estado de 0.4.0
+
+La revisión está compilada e instalada en el equipo de desarrollo. El diagnóstico informa READY para el filtro del shell y la Lupa nativa, sin error de inicialización. El hash SHA-256 de la DLL instalada coincide con el artefacto compilado. El usuario confirmó en este equipo el pellizco lento y sostenido sin los fallos observados, la alternancia con Win + «+»/«−», el cambio lateral directo, los gestos arriba/abajo y la restauración del nivel y la posición al salir de multitarea.
+
+- 52 pruebas del núcleo, 21 de runtime/ABI, 44 del adaptador nativo y 18 del filtro del shell: 135 en total.
+- El filtro del shell se prueba con sus funciones reales y callbacks falsos: inicio puntual, ausencia de replay, cancelación única, contactos desconocidos y cuatro dedos, cambio lateral único y razones de visibilidad independientes.
+- El backend simulado cubre Task View al 100 %, razones de suspensión solapadas, gestos provisionales dentro de una vista ya suspendida, preservación de la instantánea y restauración de nivel/posición.
+- Se comprueba la diferencia entre proceso nativo vivo y renderizador temporalmente indisponible. Se prueba que un objetivo del renderizador actualizado por teclado no se sobrescriba con una caché de opciones antigua.
+- La protección de ClipCursor se prueba durante la actualización del pellizco y durante el hold; el teclado y la liberación posterior conservan su comportamiento nativo.
+- Señales verificadas con los símbolos públicos y el binario actual: Task View es el bit 0x2 de MultitaskingViewVisibilityService::ViewShown/ViewDismissed. Mostrar escritorio usa el dato de Explorer g_fDesktopRaised. No depende de títulos de ventana ni de adivinar el foreground del shell.
+- MoveTo recibe this completo, RECT alineado a 16 y bool. Se solicita actualizar el destino de animación para que una transición pendiente no vuelva a una posición antigua.
+
+Pendiente: otros modelos de touchpad, otras versiones de Windows y configuraciones con varios monitores. La comprobación física anterior procede de la respuesta del usuario; no certifica estabilidad prolongada. No se han repetido pruebas automáticas visibles de oscilación del zoom.
+
+## Historial de 0.3.2
+
 
 La ruta por interfaz con porcentajes enteros mostró tirones y desplazamiento del puntero; se desactivó y se restauraron las preferencias de Windows. La revisión posterior conserva el factor decimal en los fotogramas intermedios y usa la interfaz solo para entrar/salir de ampliación. El usuario confirmó después que la ruta decimal era fluida y que el seguimiento y la alternancia con teclado funcionaban. Tras la protección añadida en 0.3.2, confirmó que el puntero se mantenía y las ventanas dejaban de saltar al sostener el pellizco. Pasar los tests no acredita por sí solo la fluidez percibida.
 
