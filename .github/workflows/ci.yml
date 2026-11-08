@@ -35,9 +35,18 @@ jobs:
         with:
           name: kde-pinch-zoom-windows-x64
           path: |
+            build/build-info.json
             build/kde-pinch-zoom.dll
             build/pinch-zoom-host.exe
             build/core-tests.exe
+            build/runtime-tests.exe
+            build/native-adapter-tests.exe
+            build/native-integration.exe
+            build/native-performance.exe
+            scripts/measure-performance.ps1
+            CHANGELOG.md
+            CONTRIBUTING.md
+            scripts/install-local.ps1
             mods/kde-pinch-zoom.wh.cpp
             README.md
             LICENSE

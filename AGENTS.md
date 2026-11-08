@@ -6,3 +6,4 @@
 - Ejecuta `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1` antes de publicar.
 - Las pruebas sintéticas no demuestran compatibilidad con un touchpad físico. Documenta por separado las comprobaciones realizadas en hardware.
 - No habilites el mod ni inicies otro Windhawk automáticamente desde scripts de compilación.
+- El usuario ha autorizado integrar `magnifier-headless`: el instalador puede desactivar ese mod antiguo, conservándolo instalado, para evitar dos hooks de ocultación simultáneos. No modifiques otros mods.

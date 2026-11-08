@@ -1,16 +1,17 @@
 // ==WindhawkMod==
 // @id              kde-pinch-zoom
-// @name            KDE Pinch Zoom
-// @name:es-ES      Zoom con pellizco de KDE
-// @description     Continuous three-finger desktop pinch zoom, leaving Windows swipe settings intact
-// @description:es-ES Zoom continuo del escritorio con un pellizco de tres dedos, conservando la configuración de deslizamientos de Windows
-// @version         0.2.0
+// @name            KWin-inspired Accessible Pinch Zoom
+// @name:es-ES      Zoom accesible inspirado en KWin
+// @description     KWin-inspired accessibility: three-finger pinch for native Windows Magnifier
+// @description:es-ES Accesibilidad inspirada en KWin: pellizco de tres dedos para la Lupa nativa de Windows
+// @version         0.3.1
 // @author          calinrus-dev
 // @github          https://github.com/calinrus-dev
 // @homepage        https://github.com/calinrus-dev/windhawk-kde-pinch-zoom
 // @include         explorer.exe
+// @include         magnify.exe
 // @architecture    amd64
-// @compilerOptions -DNOMINMAX -static -lhid -lwtsapi32 -lshell32
+// @compilerOptions -DNOMINMAX -static -lhid -lwtsapi32 -lshell32 -ladvapi32
 // @license         GPL-3.0-or-later
 // ==/WindhawkMod==
 
@@ -33,7 +34,8 @@ the shell hooks on your machine before relying on this mod.
 
 Ctrl+Alt+Shift+F10 resets the zoom. Ctrl+Alt+Shift+F9 pauses/resumes the mod.
 Disabling/unloading restores the previous view if the mod still owns it.
-Do not run Windows Magnifier or another desktop zoom tool simultaneously.
+Windows Magnifier provides rendering, keyboard shortcuts and pointer tracking.
+Its window and touch controls are hidden by default (configurable).
 
 Use Observe only first to check gesture recognition without changing the view.
 The standalone diagnostic included in the repository lists compatible HID
@@ -53,14 +55,27 @@ https://github.com/calinrus-dev/windhawk-kde-pinch-zoom
 - sensitivity: 100
   $name: Zoom sensitivity (%)
   $description: 100 follows finger spread directly; higher values zoom faster.
+- acceleration: 35
+  $name: Pinch acceleration (%)
+  $description: Extra gain for fast pinches; slow movement stays precise. 0 disables acceleration.
+- invertPinch: false
+  $name: Reverse pinch direction
 - threshold: 3
   $name: Pinch activation threshold (%)
   $description: Minimum change in finger spread before zoom starts.
-- maxZoom: 400
+- maxZoom: 0
   $name: Maximum zoom (%)
+  $description: 0 uses the native Windows Magnifier limit (1600%) without a separate mod cap.
+- keyboardInterop: true
+  $name: Share zoom with Windows Magnifier shortcuts
+- keyboardStep: 0
+  $name: Keyboard zoom increment (%)
+  $description: 0 keeps the increment configured in Windows Magnifier.
+- hideMagnifier: true
+  $name: Hide Windows Magnifier window and touch controls
 - smoothing: 0
-  $name: Smoothing time (milliseconds)
-  $description: Set to 0 for direct tracking.
+  $name: Smoothing time for standalone API mode (milliseconds)
+  $description: Native mode uses Windows Magnifier animations.
 - fallbackHeight: 60
   $name: Fallback touchpad height (% of width)
   $description: Used only when the HID descriptor omits physical dimensions.
@@ -152,13 +167,39 @@ public:
 
 struct Config {
     double sensitivity = 1.0;
+    double acceleration = 0.35;
     double threshold = 0.03;
-    double maxZoom = 4.0;
+    double maxZoom = 4096.0;
     double smoothingMs = 0;
     double fallbackAspect = 0.60;
     bool enabled = true;
     bool observeOnly = false;
     bool debug = false;
+    bool invertPinch = false;
+    bool keyboardInterop = true;
+    bool hideMagnifier = true;
+    int keyboardStep = 0;
+    int mouseFollow = 0;  // edges, proportional, fixed
+    double edgeMargin = 0.12;
+};
+inline double maximumZoom(int percent) {
+    return percent <= 0 ? 4096.0 : std::clamp(percent / 100.0, 1.0, 4096.0);
+}
+
+class FrameTiming {
+    std::optional<std::uint32_t> scan_;
+    double wall_ = 0;
+public:
+    double advance(std::optional<std::uint32_t> scan, double wall) {
+        double elapsed = wall_ > 0 ? wall - wall_ : 0;
+        if (scan && scan_) {
+            const auto delta = (*scan - *scan_) & 0xFFFFu;
+            if (delta > 0 && delta <= 1500) elapsed = delta * 0.1;
+        }
+        scan_ = scan;
+        wall_ = wall;
+        return elapsed > 0 && elapsed <= 150 ? elapsed : 0;
+    }
 };
 enum class Phase { Idle, Pending, Swipe, Pinch, Rejected };
 struct Decision {
@@ -174,14 +215,18 @@ class Recognizer {
     double radius_ = 0;
     double zoom_ = 1;
     double previousScale_ = 1;
-    double activationScale_ = 1;
+    double velocity_ = 0;
+    bool hasVelocity_ = false;
     std::uint64_t lastTime_ = 0;
 
 public:
     void reset() { phase_ = Phase::Idle; }
     Phase phase() const { return phase_; }
+    void adoptZoom(double zoom) {
+        if (std::isfinite(zoom) && zoom >= 1) zoom_ = zoom;
+    }
     Decision update(const std::vector<Contact>& frame, std::uint64_t now,
-                    double currentZoom, const Config& config) {
+                    double currentZoom, const Config& config, double elapsedMs = -1) {
         std::vector<Contact> active;
         for (const auto& contact : frame) {
             if (contact.down) {
@@ -221,10 +266,13 @@ public:
             radius_ = radius;
             zoom_ = std::isfinite(currentZoom) ? std::max(1.0, currentZoom) : 1.0;
             previousScale_ = 1;
+            velocity_ = 0;
+            hasVelocity_ = false;
             phase_ = radius >= 3 ? Phase::Pending : Phase::Rejected;
             lastTime_ = now;
             return {phase_, std::nullopt, false};
         }
+        if (elapsedMs < 0) elapsedMs = static_cast<double>(now - lastTime_);
         lastTime_ = now;
         if (phase_ == Phase::Swipe || phase_ == Phase::Rejected) {
             return {phase_, std::nullopt, false};
@@ -235,6 +283,7 @@ public:
             phase_ = Phase::Rejected;
             return {phase_, std::nullopt, false};
         }
+        const double scaleDelta = std::log(scale / previousScale_);
         previousScale_ = scale;
         const double travel = std::hypot(center.x - start_.x, center.y - start_.y);
         const double spread = std::abs(radius - radius_);
@@ -247,16 +296,24 @@ public:
             std::abs(std::log(scale)) >= std::log1p(config.threshold) &&
             spread >= 0.25 && travel <= std::max(0.8, spread * 0.8)) {
             phase_ = Phase::Pinch;
-            activationScale_ = scale;
             zoom_ = std::clamp(currentZoom, 1.0, config.maxZoom);
             began = true;
         }
         if (phase_ != Phase::Pinch) {
             return {phase_, std::nullopt, false};
         }
-        const double zoom = std::clamp(zoom_ * std::pow(scale / activationScale_, config.sensitivity),
-                                       1.0, config.maxZoom);
-        return {phase_, zoom, began};
+        double boost = 1;
+        if (!began && elapsedMs > 0 && elapsedMs <= 150) {
+            const double speed = std::abs(scaleDelta) * 1000 / elapsedMs;
+            velocity_ = hasVelocity_ ? velocity_ + (speed - velocity_) * (1 - std::exp(-elapsedMs / 35.0)) : speed;
+            hasVelocity_ = true;
+            boost += config.acceleration * std::clamp((velocity_ - 0.4) / 1.6, 0.0, 1.0);
+        }
+        const double delta = began ? 0 : scaleDelta * (config.invertPinch ? -1 : 1);
+        // Integrate from the clamped value so reversing at 100% or the maximum
+        // responds on the very next frame instead of traversing a dead zone.
+        zoom_ = std::clamp(zoom_ * std::exp(delta * config.sensitivity * boost), 1.0, config.maxZoom);
+        return {phase_, zoom_, began};
     }
 };
 
@@ -348,7 +405,8 @@ inline double smooth(double current, double target, double elapsed, double durat
 #endif
 
 namespace bridge {
-constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v1";
+constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v7";
+constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v7";
 struct alignas(8) Record {
     volatile LONG phase;
     volatile LONG down;
@@ -357,19 +415,87 @@ struct alignas(8) Record {
     volatile LONG shellPid;
     LONG reserved;
     volatile LONG64 heartbeat;
+    volatile LONG magnifierPid;
+    volatile LONG magnifierReady;
+    volatile LONG controlEnabled;
+    volatile LONG hideUi;
+    volatile LONG keyboardStep;
+    volatile LONG maxZoomPercent;
+    volatile LONG syncRequest;
+    volatile LONG nativeCommands;
+    volatile LONG pendingCommand;
+    volatile LONG nativeError;
+    volatile LONG nativeLevel; // Native target in 1/10000 units, not an animation frame.
+    volatile LONG requestedLevel;
+    volatile LONG requestedSequence;
+    volatile LONG appliedSequence;
+    volatile LONG startAtNormal;
+    volatile LONG zoomRevision;
+    volatile LONG requestRevision;
 };
 class Mapping {
     HANDLE mapping_ = nullptr;
+    HANDLE wake_ = nullptr;
+#ifdef PINCH_ZOOM_NATIVE_TEST
+    bool testRecord_ = false;
+#endif
     Record* record_ = nullptr;
     mutable HANDLE shellProcess_ = nullptr;
     mutable DWORD shellPid_ = 0;
+    mutable HANDLE magnifierProcess_ = nullptr;
+    mutable DWORD magnifierPid_ = 0;
 public:
     bool open() {
+        if (record_) return true;
         mapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(Record), kMapping);
         if (mapping_) record_ = static_cast<Record*>(MapViewOfFile(mapping_, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(Record)));
+        if (record_) wake_ = CreateEventW(nullptr, FALSE, FALSE, kWake);
         return record_ != nullptr;
     }
+    HANDLE wakeEvent() const { return wake_; }
+    void wake() { if (wake_) SetEvent(wake_); }
     Record* get() const { return record_; }
+#ifdef PINCH_ZOOM_NATIVE_TEST
+    void useTestRecord(Record* record) { record_ = record; testRecord_ = true; }
+#endif
+    bool magnifierAvailable() const {
+        if (!record_ || !InterlockedCompareExchange(&record_->magnifierReady, 0, 0)) return false;
+        const auto pid = static_cast<DWORD>(InterlockedCompareExchange(&record_->magnifierPid, 0, 0));
+        if (pid != magnifierPid_) {
+            if (magnifierProcess_) CloseHandle(magnifierProcess_);
+            magnifierProcess_ = OpenProcess(SYNCHRONIZE, FALSE, pid);
+            magnifierPid_ = pid;
+        }
+        return magnifierProcess_ && WaitForSingleObject(magnifierProcess_, 0) == WAIT_TIMEOUT;
+    }
+    void configure(const pinch::Config& config) {
+        if (!record_) return;
+        InterlockedExchange(&record_->controlEnabled, config.enabled && !config.observeOnly && config.keyboardInterop ? 1 : 0);
+        InterlockedExchange(&record_->hideUi, config.hideMagnifier ? 1 : 0);
+        InterlockedExchange(&record_->keyboardStep, config.keyboardStep);
+        InterlockedExchange(&record_->maxZoomPercent, static_cast<LONG>(config.maxZoom * 100));
+        if (!config.enabled || config.observeOnly) {
+            InterlockedExchange(&record_->appliedSequence, record_->requestedSequence);
+            InterlockedExchange(&record_->pendingCommand, 0);
+        }
+        wake();
+    }
+    double nativeLevel() const {
+        const LONG value = record_ ? InterlockedCompareExchange(&record_->nativeLevel, 0, 0) : 0;
+        return std::max(1.0, value / 10000.0);
+    }
+    bool requestLevel(double level, LONG expectedRevision = -1) {
+        if (!magnifierAvailable()) return false;
+        const LONG revision = InterlockedCompareExchange(&record_->zoomRevision, 0, 0);
+        if (expectedRevision >= 0 && revision != expectedRevision) return true; // Rebase on the next input frame.
+        InterlockedExchange(&record_->requestRevision, revision);
+        InterlockedExchange(&record_->requestedLevel, static_cast<LONG>(std::lround(std::clamp(level, 1.0, 16.0) * 10000)));
+        InterlockedIncrement(&record_->requestedSequence);
+        wake();
+        return true;
+    }
+    void syncNative() { if (record_) { InterlockedIncrement(&record_->syncRequest); wake(); } }
+    bool threeContacts() const { return record_ && InterlockedCompareExchange(&record_->down, 0, 0) != 0; }
     bool gateAvailable() const {
         if (!record_ || !InterlockedCompareExchange(&record_->gateReady, 0, 0)) return false;
         const auto pid = static_cast<DWORD>(InterlockedCompareExchange(&record_->shellPid, 0, 0));
@@ -402,9 +528,15 @@ public:
         return static_cast<pinch::Phase>(value);
     }
     ~Mapping() {
+        if (magnifierProcess_) CloseHandle(magnifierProcess_);
         if (shellProcess_) CloseHandle(shellProcess_);
+#ifdef PINCH_ZOOM_NATIVE_TEST
+        if (!testRecord_ && record_) UnmapViewOfFile(record_);
+#else
         if (record_) UnmapViewOfFile(record_);
+#endif
         if (mapping_) CloseHandle(mapping_);
+        if (wake_) CloseHandle(wake_);
     }
 };
 }  // namespace bridge
@@ -453,6 +585,10 @@ struct Device {
     bool valid = false;
     pinch::FrameAssembler assembler;
     pinch::Recognizer recognizer;
+    pinch::FrameTiming timing;
+    std::optional<std::uint32_t> frameScan;
+    unsigned activeContacts = 0;
+    bool waitingForNative = false;
 };
 
 bool hasUsage(const HIDP_VALUE_CAPS& cap, USAGE usage) {
@@ -514,6 +650,12 @@ class Zoom {
     pinch::Anchor anchor_{};
     POINT lastCursor_{};
     bool pinching_ = false;
+    unsigned revision_ = 0;
+    decltype(&GetCursorPos) getCursor_ = GetCursorPos;
+    bridge::Mapping native_;
+    bool nativeRouting_ = true;
+    LONG keyboardRevision_ = 0;
+    bool nativeActive() const { return nativeRouting_ && native_.magnifierAvailable(); }
 
     static pinch::Desktop desktop() {
         return {static_cast<double>(GetSystemMetrics(SM_XVIRTUALSCREEN)),
@@ -535,7 +677,17 @@ class Zoom {
     }
 
 public:
+#ifdef PINCH_ZOOM_RUNTIME_TEST
+    void useTestBackend(GetTransform readFn, SetTransform writeFn, decltype(&GetCursorPos) cursorFn) {
+        get_ = readFn;
+        set_ = writeFn;
+        getCursor_ = cursorFn;
+        initialized_ = true;
+        nativeRouting_ = false;
+    }
+#endif
     bool initialize() {
+        native_.open();
         // Windhawk's MinGW SDK omits these function declarations and import
         // library. Resolve the documented API from the system DLL explicitly.
         module_ = LoadLibraryExW(L"Magnification.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -547,24 +699,45 @@ public:
         initialized_ = init && uninitialize_ && get_ && set_ && init() != FALSE;
         return initialized_;
     }
-    double current() const { return read().value_or(pinch::View{}).zoom; }
-    bool resetToNormal() { return initialized_ && set_(1.0f, 0, 0) != FALSE; }
+    double current() const { return nativeActive() ? native_.nativeLevel() : read().value_or(pinch::View{}).zoom; }
+    double rendered() const { return read().value_or(pinch::View{}).zoom; }
+    unsigned revision() const { return revision_; }
+    bool resetToNormal() {
+        if (nativeActive()) {
+            InterlockedExchange(&native_.get()->pendingCommand, 3);
+            native_.syncNative();
+            return true;
+        }
+        if (!initialized_ || !set_(1.0f, 0, 0)) return false;
+        last_ = {};
+        original_ = {};
+        target_ = 1;
+        owned_ = false;
+        pinching_ = false;
+        ++revision_;
+        return true;
+    }
     bool target(double value, bool began = false) {
+        if (nativeActive()) { (void)began; return native_.requestLevel(value, keyboardRevision_); }
         if (!initialized_) {
             return false;
         }
+        const auto actual = read();
+        if (!actual || !std::isfinite(actual->zoom) || actual->zoom < 1) return false;
         if (!owned_) {
-            const auto original = read();
-            if (!original || original->zoom > 1.001) {
-                log(L"Another magnifier is active; zoom skipped. Close it and try again.");
-                return false;
-            }
-            original_ = last_ = *original;
+            original_ = {};
+            last_ = *actual;
             owned_ = true;
+        } else if (!same(*actual, last_)) {
+            last_ = *actual;
+            target_ = actual->zoom;
+            pinching_ = false;
+            ++revision_;
+            if (!began) return true; // Rebase before applying another finger delta.
         }
         if (began || !pinching_) {
             POINT cursor{};
-            if (!GetCursorPos(&cursor)) return false;
+            if (!getCursor_(&cursor)) return false;
             anchor_ = pinch::anchorAt(last_, {static_cast<double>(cursor.x), static_cast<double>(cursor.y)});
             lastCursor_ = cursor;
             pinching_ = true;
@@ -574,33 +747,49 @@ public:
     }
     void end() {
         pinching_ = false;
-        GetCursorPos(&lastCursor_);
+        getCursor_(&lastCursor_);
     }
-    bool tick(double elapsed, double smoothing) {
+    bool tick(double elapsed, double smoothing, int follow = 0, double margin = 0.12) {
+        if (nativeActive()) {
+            const LONG sequence = InterlockedCompareExchange(&native_.get()->zoomRevision, 0, 0);
+            if (keyboardRevision_ != sequence) { keyboardRevision_ = sequence; ++revision_; }
+            return true; // Windows owns rendering, cursor and focus tracking.
+        }
         if (!owned_) {
             return true;
         }
         const auto actual = read();
-        if (!actual || !same(*actual, last_)) {
-            owned_ = false;
-            log(L"Magnification changed externally; released control.");
-            return false;
+        if (!actual) return false;
+        if (!same(*actual, last_)) {
+            last_ = *actual;
+            target_ = actual->zoom;
+            pinching_ = false;
+            POINT cursor{};
+            if (getCursor_(&cursor)) {
+                anchor_ = pinch::anchorAt(last_, {static_cast<double>(cursor.x), static_cast<double>(cursor.y)});
+                lastCursor_ = cursor;
+            }
+            ++revision_;
+            return true;
         }
         POINT cursor{};
-        if (!GetCursorPos(&cursor)) {
+        if (!getCursor_(&cursor)) {
             return true;
         }
         const double level = pinch::smooth(last_.zoom, target_, elapsed, smoothing);
-        if (!pinching_ && (cursor.x != lastCursor_.x || cursor.y != lastCursor_.y)) {
+        if (pinching_ && (cursor.x != lastCursor_.x || cursor.y != lastCursor_.y))
+            anchor_ = pinch::anchorAt(last_, {static_cast<double>(cursor.x), static_cast<double>(cursor.y)});
+        if (!pinching_ && follow != 2 && (cursor.x != lastCursor_.x || cursor.y != lastCursor_.y)) {
             const auto bounds = desktop();
             const auto source = pinch::Point{static_cast<double>(cursor.x), static_cast<double>(cursor.y)};
             const auto currentAnchor = pinch::anchorAt(last_, source);
             // Push the viewport only when the pointer approaches an edge.
-            anchor_ = {source,
-                {std::clamp(currentAnchor.display.x, bounds.left + bounds.width * 0.12,
-                            bounds.left + bounds.width * 0.88),
-                 std::clamp(currentAnchor.display.y, bounds.top + bounds.height * 0.12,
-                            bounds.top + bounds.height * 0.88)}};
+            margin = std::clamp(margin, 0.0, 0.4);
+            anchor_ = follow == 1 ? pinch::Anchor{source, source} : pinch::Anchor{source,
+                {std::clamp(currentAnchor.display.x, bounds.left + bounds.width * margin,
+                            bounds.left + bounds.width * (1 - margin)),
+                 std::clamp(currentAnchor.display.y, bounds.top + bounds.height * margin,
+                            bounds.top + bounds.height * (1 - margin))}};
         }
         lastCursor_ = cursor;
         const auto next = pinch::anchoredView(level, anchor_, desktop());
@@ -629,7 +818,7 @@ public:
     }
     ~Zoom() {
         restore();
-        if (initialized_) {
+        if (initialized_ && uninitialize_) {
             uninitialize_();
         }
         if (module_) FreeLibrary(module_);
@@ -663,6 +852,58 @@ class Host {
     Statistics statistics_;
     bridge::Mapping bridge_;
     bool gateNotice_ = false;
+    unsigned observedRevision_ = 0;
+    HANDLE nativeProcess_ = nullptr;
+    unsigned nativeAttempts_ = 0;
+    bool sawNative_ = false;
+    bool nativeLaunchRequested_ = true;
+    std::uint64_t lastNativeAttempt_ = 0;
+
+    bool contactsDown() const {
+        return std::any_of(devices_.begin(), devices_.end(), [](const auto& entry) { return entry.second.activeContacts != 0; });
+    }
+    void restartGestureTracking() {
+        waitForRelease_ = contactsDown();
+        resetGestures();
+    }
+    void render(std::uint64_t now) {
+        if (!zoom_.tick(static_cast<double>(now - lastTick_), config_.smoothingMs,
+                        config_.mouseFollow, config_.edgeMargin)) restartGestureTracking();
+        if (observedRevision_ != zoom_.revision()) {
+            observedRevision_ = zoom_.revision();
+            const double level = zoom_.current();
+            for (auto& [id, dev] : devices_) { (void)id; dev.recognizer.adoptZoom(level); }
+        }
+        lastTick_ = now;
+    }
+    void ensureNativeMagnifier(std::uint64_t now) {
+        if (!config_.enabled || config_.observeOnly || !config_.keyboardInterop || !sessionActive_) return;
+        if (bridge_.magnifierAvailable()) { sawNative_ = true; nativeAttempts_ = 0; return; }
+        if (sawNative_) {
+            sawNative_ = false;
+            nativeLaunchRequested_ = false;
+            zoom_.resetToNormal();
+            restartGestureTracking();
+        }
+        if (!nativeLaunchRequested_) return;
+        if (nativeProcess_ && WaitForSingleObject(nativeProcess_, 0) == WAIT_TIMEOUT) return;
+        if (nativeAttempts_ >= 3 || now - lastNativeAttempt_ < 1500) return;
+        if (nativeProcess_) { CloseHandle(nativeProcess_); nativeProcess_ = nullptr; }
+        wchar_t system[MAX_PATH];
+        const UINT length = GetSystemDirectoryW(system, ARRAYSIZE(system));
+        if (!length || length + 13 >= ARRAYSIZE(system)) return;
+        std::wstring path(system);
+        path += L"\\Magnify.exe";
+        SHELLEXECUTEINFOW launch{};
+        launch.cbSize = sizeof(launch);
+        launch.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+        launch.lpFile = path.c_str();
+        launch.nShow = config_.hideMagnifier ? SW_HIDE : SW_SHOWNOACTIVATE;
+        lastNativeAttempt_ = now;
+        ++nativeAttempts_;
+        if (bridge_.get()) InterlockedExchange(&bridge_.get()->startAtNormal, 1);
+        if (ShellExecuteExW(&launch)) nativeProcess_ = launch.hProcess;
+    }
 
     void resetGestures() {
         bridge_.publish(pinch::Phase::Idle, false, false);
@@ -752,23 +993,36 @@ class Host {
         }
         return dev.valid ? &dev : nullptr;
     }
-    void frame(HANDLE handle, Device& dev, const std::vector<pinch::Contact>& contacts, ULONGLONG now) {
+    void frame(HANDLE handle, Device& dev, const std::vector<pinch::Contact>& contacts, ULONGLONG now, double elapsedMs) {
         ++statistics_.frames;
+        dev.activeContacts = static_cast<unsigned>(std::count_if(contacts.begin(), contacts.end(), [](const auto& c) { return c.down; }));
         if (paused_ || !sessionActive_ || !config_.enabled) {
             bridge_.publish(pinch::Phase::Idle, false, false);
             return;
         }
         if (waitForRelease_) {
-            if (std::none_of(contacts.begin(), contacts.end(), [](const pinch::Contact& c) { return c.down; })) {
+            if (dev.activeContacts < 3) {
                 waitForRelease_ = false;
             }
             return;
         }
+        render(now); // Adopt keyboard targets before computing this finger delta.
         const auto before = dev.recognizer.phase();
-        const auto decision = dev.recognizer.update(contacts, now, zoom_.current(), config_);
-        bridge_.publish(decision.phase == pinch::Phase::Rejected ? pinch::Phase::Swipe : decision.phase,
-                        decision.phase != pinch::Phase::Idle, !config_.observeOnly);
-        if (before == pinch::Phase::Pinch && decision.phase != pinch::Phase::Pinch) zoom_.end();
+        if (dev.waitingForNative) {
+            dev.recognizer.adoptZoom(zoom_.current());
+            dev.waitingForNative = !bridge_.magnifierAvailable();
+        }
+        auto effective = config_;
+        if (config_.keyboardInterop) effective.maxZoom = std::min(effective.maxZoom, 16.0);
+        const auto decision = dev.recognizer.update(contacts, now, zoom_.current(), effective, elapsedMs);
+        const auto phase = decision.phase == pinch::Phase::Rejected ||
+                           (decision.phase == pinch::Phase::Idle && dev.activeContacts == 3)
+                               ? pinch::Phase::Swipe : decision.phase;
+        bridge_.publish(phase, dev.activeContacts == 3, !config_.observeOnly);
+        if (before == pinch::Phase::Pinch && decision.phase != pinch::Phase::Pinch) {
+            zoom_.end();
+            bridge_.syncNative();
+        }
         if (decision.phase == pinch::Phase::Idle && activeDevice_ == handle) {
             activeDevice_ = nullptr;
         }
@@ -780,15 +1034,20 @@ class Host {
         }
         if (decision.began) {
             ++statistics_.pinches;
+            nativeLaunchRequested_ = true;
+            if (!config_.observeOnly) ensureNativeMagnifier(now);
             if (config_.debug) {
                 log(L"Three-finger pinch recognized.");
             }
         }
         if (decision.zoom && (!activeDevice_ || activeDevice_ == handle)) {
             activeDevice_ = handle;
-            if (!config_.observeOnly && !bridge_.gateAvailable()) {
-                if (!gateNotice_) log(L"Native swipe gate is not loaded in Explorer. Install the 0.2 mod in Windhawk; zoom stays off to avoid conflicting gestures.");
+            if (!config_.observeOnly && (!bridge_.gateAvailable() ||
+                (config_.keyboardInterop && !bridge_.magnifierAvailable()))) {
+                if (!gateNotice_) log(L"Native zoom integration is not ready; waiting for the companion before applying pinch zoom.");
                 gateNotice_ = true;
+                dev.recognizer.adoptZoom(zoom_.current());
+                dev.waitingForNative = true;
                 return;
             }
             if (!config_.observeOnly && !zoom_.target(*decision.zoom, decision.began)) {
@@ -796,13 +1055,7 @@ class Host {
                 activeDevice_ = nullptr;
             }
             // Apply on the input frame, without waiting for the 16 ms timer.
-            if (!config_.observeOnly) {
-                if (!zoom_.tick(static_cast<double>(now - lastTick_), config_.smoothingMs)) {
-                    resetGestures();
-                    waitForRelease_ = true;
-                }
-                lastTick_ = now;
-            }
+            if (!config_.observeOnly) render(now);
         }
     }
     void report(HANDLE handle, Device& dev, char* bytes, ULONG length) {
@@ -829,6 +1082,7 @@ class Host {
         if (dev.hasScan) {
             decoded.scan = value(kDigitizer, dev.scanCollection, kScanTime);
         }
+        if (decoded.count && decoded.scan) dev.frameScan = decoded.scan;
         for (const auto& slot : dev.slots) {
             if (length == 0 || (slot.reportId != 0 && static_cast<UCHAR>(bytes[0]) != slot.reportId)) {
                 continue;
@@ -863,7 +1117,12 @@ class Host {
         }
         const auto now = GetTickCount64();
         if (const auto complete = dev.assembler.feed(decoded, now)) {
-            frame(handle, dev, *complete, now);
+            LARGE_INTEGER counter{}, frequency{};
+            QueryPerformanceCounter(&counter);
+            QueryPerformanceFrequency(&frequency);
+            const double preciseMs = 1000.0 * static_cast<double>(counter.QuadPart) / frequency.QuadPart;
+            const double elapsed = dev.timing.advance(dev.frameScan, preciseMs);
+            frame(handle, dev, *complete, now, elapsed);
         }
     }
     void rawInput(HRAWINPUT handle) {
@@ -923,11 +1182,8 @@ class Host {
             case WM_TIMER: {
                 const auto now = GetTickCount64();
                 host->bridge_.heartbeat();
-                if (!host->zoom_.tick(static_cast<double>(now - host->lastTick_), host->config_.smoothingMs)) {
-                    host->resetGestures();
-                    host->waitForRelease_ = true;
-                }
-                host->lastTick_ = now;
+                host->ensureNativeMagnifier(now);
+                host->render(now);
                 if (host->config_.debug && now - host->lastDiagnostic_ >= 5000) {
                     host->lastDiagnostic_ = now;
                     wchar_t summary[256];
@@ -943,9 +1199,9 @@ class Host {
                 return 0;
             }
             case WM_HOTKEY:
-                host->zoom_.restore();
-                host->resetGestures();
-                host->waitForRelease_ = true;
+                host->zoom_.resetToNormal();
+                host->bridge_.syncNative();
+                host->restartGestureTracking();
                 host->bridge_.publish(pinch::Phase::Idle, false, false);
                 if (w == kPauseHotkey) {
                     host->paused_ = !host->paused_;
@@ -976,10 +1232,13 @@ class Host {
                 }
                 return TRUE;
             case kSettingsMessage:
-                host->zoom_.restore();
-                host->resetGestures();
-                host->waitForRelease_ = true;
+                host->zoom_.end();
+                host->restartGestureTracking();
                 host->config_ = *reinterpret_cast<const pinch::Config*>(l);
+                host->bridge_.configure(host->config_);
+                host->nativeAttempts_ = 0;
+                if (!host->config_.enabled || host->config_.observeOnly) host->zoom_.resetToNormal();
+                host->bridge_.syncNative();
                 return 0;
             case kStopMessage:
             case WM_CLOSE:
@@ -1039,6 +1298,7 @@ public:
         }
         wtsRegistered_ = WTSRegisterSessionNotification(window_, NOTIFY_FOR_THIS_SESSION) != FALSE;
         if (!bridge_.open()) return false;
+        bridge_.configure(config_);
         bridge_.publish(pinch::Phase::Pending, false, config_.enabled && !config_.observeOnly);
         lastTick_ = GetTickCount64();
         lastDiagnostic_ = lastTick_;
@@ -1087,6 +1347,8 @@ public:
     ~Host() {
         bridge_.publish(pinch::Phase::Idle, false, false);
         zoom_.restore();
+        if (auto* record = bridge_.get()) InterlockedExchange(&record->controlEnabled, 0);
+        if (nativeProcess_) CloseHandle(nativeProcess_);
         if (window_) {
             KillTimer(window_, kTimer);
             UnregisterHotKey(window_, kResetHotkey);
@@ -1117,6 +1379,7 @@ int wmain(int argc, wchar_t** argv) {
     bool smoke = false;
     bool status = false;
     bool reset = false;
+    std::optional<int> nativeStep;
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
         if (arg == L"--run") {
@@ -1130,6 +1393,12 @@ int wmain(int argc, wchar_t** argv) {
             status = true;
         } else if (arg == L"--reset") {
             reset = true;
+        } else if (arg == L"--native-step" && i + 1 < argc) {
+            const std::wstring direction = argv[++i];
+            if (direction == L"in") nativeStep = 1;
+            else if (direction == L"out") nativeStep = 2;
+            else if (direction == L"reset") nativeStep = 3;
+            else return 2;
         } else if (arg == L"--seconds" && i + 1 < argc) {
             wchar_t* end = nullptr;
             const unsigned long parsed = std::wcstoul(argv[++i], &end, 10);
@@ -1143,6 +1412,13 @@ int wmain(int argc, wchar_t** argv) {
             return 2;
         }
     }
+    if (nativeStep) {
+        bridge::Mapping mapping;
+        if (!mapping.open() || !mapping.magnifierAvailable()) return 3;
+        InterlockedExchange(&mapping.get()->pendingCommand, *nativeStep);
+        mapping.syncNative();
+        return 0;
+    }
     if (status) {
         bridge::Mapping mapping;
         if (!mapping.open()) return 1;
@@ -1151,6 +1427,10 @@ int wmain(int argc, wchar_t** argv) {
                     mapping.gateAvailable() ? "READY" : "NOT LOADED", record->shellPid,
                     record->enabled, record->phase, record->reserved,
                     static_cast<unsigned long long>(GetTickCount64() - record->heartbeat));
+        runtime::Zoom inspector;
+        if (inspector.initialize()) std::printf("Windows Magnifier: %s; pid=%ld; hidden=%ld; keyboardCommands=%ld; lastError=%ld; actualZoom=%.2f%%\n",
+            mapping.magnifierAvailable() ? "READY" : "NOT LOADED", record->magnifierPid,
+            record->hideUi, record->nativeCommands, record->nativeError, inspector.rendered() * 100);
         return mapping.gateAvailable() ? 0 : 3;
     }
     if (reset) {
@@ -1204,8 +1484,350 @@ int wmain(int argc, wchar_t** argv) {
     return result;
 }
 
-#else  // Windhawk Explorer adapter
+#endif  // Standalone CLI
 
+#if !defined(PINCH_ZOOM_STANDALONE) || defined(PINCH_ZOOM_NATIVE_TEST)
+
+namespace magnifier {
+using Change = void(*)(void*, float, POINT*);
+using Run = void(*)(void*);
+using SetLevel = void(*)(void*, long);
+using ZoomCommand = void(*)(void*, int);
+using SetOption = void(*)(void*, int, long, bool);
+using GetOption = long(*)(void*, int);
+using GetKeeper = HRESULT(*)(void**);
+Change originalChange = nullptr;
+Run originalRun = nullptr;
+SetLevel setLevel = nullptr;
+ZoomCommand originalZoomCommand = nullptr;
+std::atomic<void*> nativeUi{nullptr};
+std::atomic<bool> trackingInitialized{false};
+std::atomic<DWORD> rendererThread{0};
+SetOption originalOption = nullptr;
+GetOption getOption = nullptr;
+GetKeeper getKeeper = nullptr;
+decltype(&ShowWindow) originalShow = nullptr;
+decltype(&SetWindowPos) originalPosition = nullptr;
+decltype(&CreateWindowExW) originalCreate = nullptr;
+decltype(&SetWindowLongPtrW) originalStyle = nullptr;
+bridge::Mapping mapping;
+bool role = false;
+std::atomic<bool> hiding{true};
+std::mutex stylesMutex;
+std::map<HWND, LONG_PTR> styles;
+HANDLE stopEvent = nullptr;
+HANDLE thread = nullptr;
+std::atomic<HWND> messageWindow{nullptr};
+std::atomic<bool> stopping{false};
+std::atomic<unsigned> activeUpdates{0};
+constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v7";
+std::atomic<DWORD> uiThread{0};
+std::atomic<void*> nativeSelf{nullptr}; // Dereferenced only on the native rendering thread.
+thread_local bool applyingPinch = false;
+const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v7");
+LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l);
+void publish(float level) {
+    if (mapping.get()) InterlockedExchange(&mapping.get()->nativeLevel, static_cast<LONG>(std::lround(level * 10000)));
+}
+void run(void* self) {
+    nativeUi.store(self);
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                      reinterpret_cast<LPCWSTR>(&messages), &module);
+    WNDCLASSW cls{};
+    cls.hInstance = module;
+    cls.lpfnWndProc = messages;
+    cls.lpszClassName = kNativeClass;
+    if (RegisterClassW(&cls) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS) {
+        messageWindow.store(CreateWindowExW(0, kNativeClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, module, nullptr));
+        if (messageWindow) {
+            uiThread.store(GetCurrentThreadId());
+            if (nativeSelf) InterlockedExchange(&mapping.get()->magnifierReady, 1);
+        }
+    }
+    // Run owns the message loop. Tail-call it so no mod return address remains
+    // on the UI stack when Windhawk later unloads this DLL.
+    [[clang::musttail]] return originalRun(self);
+}
+void change(void* self, float level, POINT* point) {
+    rendererThread.store(GetCurrentThreadId());
+    nativeSelf = self;
+    if (InterlockedExchange(&mapping.get()->startAtNormal, 0)) {
+        // A pinch-started process must not replay a previously saved keyboard zoom.
+        void* keeper = nullptr;
+        if (SUCCEEDED(getKeeper(&keeper)) && keeper) {
+            applyingPinch = true;
+            originalOption(keeper, 14, 100, false);
+            applyingPinch = false;
+        }
+        level = 1;
+        point = nullptr;
+    }
+    originalChange(self, level, point); // Preserve all native animations and focus tracking.
+    publish(level);
+    if (messageWindow) InterlockedExchange(&mapping.get()->magnifierReady, 1);
+}
+long readOption(void* self, int name) {
+    if (name == 20 && mapping.get() && mapping.get()->keyboardStep > 0)
+        return mapping.get()->keyboardStep;
+    return getOption(self, name);
+}
+void nativeCommandComplete(void*) {
+    if (applyingPinch) return;
+    void* keeper = nullptr;
+    if (FAILED(getKeeper(&keeper)) || !keeper) return;
+    publish(getOption(keeper, 14) / 100.0f);
+    InterlockedExchange(&mapping.get()->appliedSequence, mapping.get()->requestedSequence);
+    InterlockedIncrement(&mapping.get()->nativeCommands);
+    InterlockedIncrement(&mapping.get()->zoomRevision);
+    trackingInitialized.store(mapping.get()->nativeLevel > 10000);
+}
+void uiLevel(void* self, long level) {
+    setLevel(self, level);
+    nativeCommandComplete(self);
+}
+void zoomCommand(void* self, int command) {
+    originalZoomCommand(self, command);
+    nativeCommandComplete(self);
+}
+void option(void* self, int name, long value, bool save) {
+    if (applyingPinch) save = false; // No registry writes for every HID frame.
+    const long previousMode = name == 4 ? getOption(self, 4) : 0;
+    originalOption(self, name, value, save);
+    if (name == 4 && mapping.get() && previousMode != getOption(self, 4)) {
+        // Mode changes can destroy the fullscreen renderer. Do not keep using it.
+        InterlockedExchange(&mapping.get()->magnifierReady, 0);
+        nativeSelf = nullptr;
+    }
+}
+LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
+    if (message == WM_CLOSE) {
+        const bool reentrant = activeUpdates.load() != 0;
+        DestroyWindow(window);
+        return reentrant ? 1 : 0;
+    }
+    if (message == WM_NCDESTROY) { messageWindow.store(nullptr); return DefWindowProcW(window, message, w, l); }
+    if (message == updateMessage) {
+        if (stopping.load()) return 0;
+        struct ActiveUpdate {
+            ActiveUpdate() { activeUpdates.fetch_add(1); }
+            ~ActiveUpdate() { activeUpdates.fetch_sub(1); }
+        } active;
+        auto* state = mapping.get();
+        const LONG sequence = InterlockedCompareExchange(&state->requestedSequence, 0, 0);
+        const LONG action = InterlockedExchange(&state->pendingCommand, 0);
+        void* keeper = nullptr;
+        if ((action || sequence != state->appliedSequence) && (state->controlEnabled || action == 3) && state->magnifierReady && nativeUi && SUCCEEDED(getKeeper(&keeper)) && keeper) {
+            double level = InterlockedCompareExchange(&state->requestedLevel, 0, 0) / 10000.0;
+            if (action) {
+                const double current = getOption(keeper, 14) / 100.0;
+                const double step = getOption(keeper, 20) / 100.0;
+                level = action == 3 ? 1 : current + (action == 1 ? step : -step);
+            }
+            const double cap = std::clamp(state->maxZoomPercent / 100.0, 1.0, 16.0);
+            level = std::clamp(level, 1.0, cap);
+            if (!action && state->requestRevision != state->zoomRevision) {
+                InterlockedExchange(&state->appliedSequence, sequence);
+                return 0; // A keyboard change or priming step invalidated this finger baseline.
+            }
+            if (rendererThread.load() != GetCurrentThreadId()) {
+                InterlockedExchange(&state->nativeError, ERROR_INVALID_THREAD_ID);
+                return 0; // Preserve native controls instead of calling an object on the wrong thread.
+            }
+            const double previous = state->nativeLevel / 10000.0;
+            const bool prime = level > 1 && (!trackingInitialized.load() || previous <= 1);
+            const bool reset = level <= 1 && (previous > 1 || action == 3);
+            double delivered = level;
+            if (prime || reset || std::abs(level - previous) >= 0.00005) {
+                applyingPinch = true;
+                long percent = static_cast<long>(std::lround(level * 100));
+                if (prime) percent = std::max(101L, percent);
+                originalOption(keeper, 14, percent, false);
+                if (prime || reset) {
+                    // Exactly one UI update enters/leaves magnification and its
+                    // native tracker. All intermediate frames retain float precision.
+                    setLevel(nativeUi, percent);
+                    delivered = percent / 100.0;
+                    trackingInitialized.store(prime);
+                } else {
+                    originalChange(nativeSelf, static_cast<float>(level), nullptr);
+                }
+                applyingPinch = false;
+            }
+            publish(static_cast<float>(delivered));
+            if (prime) InterlockedIncrement(&state->zoomRevision);
+            InterlockedExchange(&state->nativeError, 0);
+            InterlockedExchange(&state->appliedSequence, sequence);
+            if (action) { InterlockedIncrement(&state->nativeCommands); InterlockedIncrement(&state->zoomRevision); }
+        }
+        return 0;
+    }
+    return DefWindowProcW(window, message, w, l);
+}
+bool isUi(HWND window) {
+    DWORD process = 0;
+    GetWindowThreadProcessId(window, &process);
+    if (process != GetCurrentProcessId()) return false;
+    wchar_t name[128]{}, title[128]{};
+    GetClassNameW(window, name, ARRAYSIZE(name));
+    GetWindowTextW(window, title, ARRAYSIZE(title));
+    return wcscmp(name, L"MagUIClass") == 0 || wcscmp(name, L"ScreenMagnifierUIWnd") == 0 ||
+           wcsstr(title, L"Magnifier Touch") != nullptr;
+}
+void hide(HWND window) {
+    const LONG_PTR style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    {
+        std::lock_guard lock(stylesMutex);
+        styles.try_emplace(window, style);
+    }
+    originalStyle(window, GWL_EXSTYLE, (style & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+    originalShow(window, SW_HIDE);
+}
+BOOL CALLBACK visibility(HWND window, LPARAM) {
+    if (!isUi(window)) return TRUE;
+    if (hiding.load()) hide(window);
+    else {
+        std::optional<LONG_PTR> saved;
+        {
+            std::lock_guard lock(stylesMutex);
+            if (auto found = styles.find(window); found != styles.end()) { saved = found->second; styles.erase(found); }
+        }
+        if (saved) {
+            originalStyle(window, GWL_EXSTYLE, *saved);
+            wchar_t name[128]{};
+            GetClassNameW(window, name, ARRAYSIZE(name));
+            if (wcscmp(name, L"MagUIClass") == 0 || wcscmp(name, L"ScreenMagnifierUIWnd") == 0)
+                originalShow(window, SW_SHOWNOACTIVATE);
+        }
+    }
+    return TRUE;
+}
+BOOL WINAPI show(HWND window, int command) {
+    return originalShow(window, hiding.load() && isUi(window) ? SW_HIDE : command);
+}
+BOOL WINAPI position(HWND window, HWND after, int x, int y, int width, int height, UINT flags) {
+    if (hiding.load() && isUi(window)) flags = (flags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
+    return originalPosition(window, after, x, y, width, height, flags);
+}
+LONG_PTR WINAPI style(HWND window, int index, LONG_PTR value) {
+    if (hiding.load() && index == GWL_EXSTYLE && isUi(window)) {
+        { std::lock_guard lock(stylesMutex); styles.try_emplace(window, GetWindowLongPtrW(window, GWL_EXSTYLE)); }
+        value = (value & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+    }
+    return originalStyle(window, index, value);
+}
+HWND WINAPI create(DWORD ex, LPCWSTR name, LPCWSTR title, DWORD flags, int x, int y, int width, int height,
+                   HWND parent, HMENU menu, HINSTANCE instance, LPVOID parameter) {
+    const bool named = reinterpret_cast<ULONG_PTR>(name) > 0xFFFF;
+    if (hiding.load() && named &&
+        (wcscmp(name, L"MagUIClass") == 0 || wcscmp(name, L"ScreenMagnifierUIWnd") == 0 ||
+         (title && wcsstr(title, L"Magnifier Touch")))) flags &= ~WS_VISIBLE;
+    const HWND window = originalCreate(ex, name, title, flags, x, y, width, height, parent, menu, instance, parameter);
+    if (window && hiding.load() && isUi(window)) hide(window);
+    return window;
+}
+
+DWORD WINAPI worker(void*) {
+    LONG last = mapping.get()->appliedSequence, lastCommand = -1;
+    const HANDLE events[] = {stopEvent, mapping.wakeEvent()};
+    for (;;) {
+        const DWORD result = events[1] ? WaitForMultipleObjects(2, events, FALSE, 250) : WaitForSingleObject(stopEvent, 4);
+        if (result == WAIT_OBJECT_0 || result == WAIT_FAILED) break;
+        auto* state = mapping.get();
+        if (!state) continue;
+        const bool hideNow = InterlockedCompareExchange(&state->hideUi, 0, 0) != 0;
+        if (hiding.exchange(hideNow) != hideNow) EnumWindows(visibility, 0);
+        const LONG sequence = InterlockedCompareExchange(&state->requestedSequence, 0, 0);
+        const LONG command = InterlockedCompareExchange(&state->syncRequest, 0, 0);
+        const HWND target = messageWindow.load();
+        // Coalesce pending HID updates; process them on Windows' own UI thread.
+        if (target && (sequence != last || command != lastCommand)) {
+            if (((sequence != last && sequence) || state->pendingCommand) && PostMessageW(target, updateMessage, 0, 0)) {
+                last = sequence; lastCommand = command;
+            } else if (sequence == last && !state->pendingCommand) { lastCommand = command; }
+        }
+    }
+    return 0;
+}
+#ifndef PINCH_ZOOM_NATIVE_TEST
+bool initialize() {
+    if (!mapping.open()) return false;
+    hiding.store(Wh_GetIntSetting(L"hideMagnifier") != 0);
+    void* targets[7]{};
+    WH_FIND_SYMBOL symbol{};
+    const HANDLE search = Wh_FindFirstSymbol(GetModuleHandleW(nullptr), nullptr, &symbol);
+    if (!search) return false;
+    do {
+        if (wcsstr(symbol.symbol, L"FullscreenMagnifier::ChangeMagnificationFactor(float,class CPoint")) targets[0] = symbol.address;
+        if (wcsstr(symbol.symbol, L"OptionsKeeper::SetOption(") && wcsstr(symbol.symbol, L"long,bool")) targets[1] = symbol.address;
+        if (wcsstr(symbol.symbol, L"OptionsKeeper::GetOption(")) targets[2] = symbol.address;
+        if (wcsstr(symbol.symbol, L"OptionsKeeper::GetOptionsKeeper(")) targets[3] = symbol.address;
+        if (wcsstr(symbol.symbol, L"MagnifierUI::Run(")) targets[4] = symbol.address;
+        if (wcsstr(symbol.symbol, L"MagnifierUI::HandleSetZoomLevel(")) targets[5] = symbol.address;
+        if (wcsstr(symbol.symbol, L"MagnifierUI::HandleZoomCommand(")) targets[6] = symbol.address;
+        if (std::all_of(std::begin(targets), std::end(targets), [](void* target) { return target != nullptr; })) break;
+    } while (Wh_FindNextSymbol(search, &symbol));
+    Wh_FindCloseSymbol(search);
+    for (auto target : targets) if (!target) { Wh_Log(L"Native Magnifier symbols unavailable."); return false; }
+    getOption = reinterpret_cast<GetOption>(targets[2]);
+    getKeeper = reinterpret_cast<GetKeeper>(targets[3]);
+    role = true;
+    return Wh_SetFunctionHook(targets[4], reinterpret_cast<void*>(run), reinterpret_cast<void**>(&originalRun)) &&
+        Wh_SetFunctionHook(targets[5], reinterpret_cast<void*>(uiLevel), reinterpret_cast<void**>(&setLevel)) &&
+        Wh_SetFunctionHook(targets[6], reinterpret_cast<void*>(zoomCommand), reinterpret_cast<void**>(&originalZoomCommand)) &&
+        Wh_SetFunctionHook(targets[0], reinterpret_cast<void*>(change), reinterpret_cast<void**>(&originalChange)) &&
+        Wh_SetFunctionHook(targets[1], reinterpret_cast<void*>(option), reinterpret_cast<void**>(&originalOption)) &&
+        Wh_SetFunctionHook(targets[2], reinterpret_cast<void*>(readOption), reinterpret_cast<void**>(&getOption)) &&
+        Wh_SetFunctionHook(reinterpret_cast<void*>(ShowWindow), reinterpret_cast<void*>(show), reinterpret_cast<void**>(&originalShow)) &&
+        Wh_SetFunctionHook(reinterpret_cast<void*>(SetWindowPos), reinterpret_cast<void*>(position), reinterpret_cast<void**>(&originalPosition)) &&
+        Wh_SetFunctionHook(reinterpret_cast<void*>(CreateWindowExW), reinterpret_cast<void*>(create), reinterpret_cast<void**>(&originalCreate)) &&
+        Wh_SetFunctionHook(reinterpret_cast<void*>(SetWindowLongPtrW), reinterpret_cast<void*>(style), reinterpret_cast<void**>(&originalStyle));
+}
+#endif
+void afterInit() {
+    InterlockedExchange(&mapping.get()->magnifierPid, static_cast<LONG>(GetCurrentProcessId()));
+    InterlockedExchange(&mapping.get()->magnifierReady, 0);
+    InterlockedExchange(&mapping.get()->appliedSequence, mapping.get()->requestedSequence);
+    InterlockedExchange(&mapping.get()->pendingCommand, 0);
+    EnumWindows(visibility, 0);
+    stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (stopEvent) thread = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
+}
+void stop() {
+    stopping.store(true);
+    if (mapping.get()) InterlockedExchange(&mapping.get()->magnifierReady, 0);
+    if (stopEvent) SetEvent(stopEvent);
+    if (thread) { WaitForSingleObject(thread, INFINITE); CloseHandle(thread); }
+    const HWND target = messageWindow.load();
+    bool drained = !target;
+    if (target && uiThread.load() == GetCurrentThreadId()) {
+        const bool active = activeUpdates.load() != 0;
+        drained = DestroyWindow(target) != FALSE && !active;
+    }
+    else if (target) {
+        DWORD_PTR result = 0;
+        // Destroy synchronously on its own thread. On return, its WndProc has
+        // finished unless WM_CLOSE reports a reentrant update still on the stack.
+        drained = SendMessageTimeoutW(target, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 500, &result) != 0 && result == 0;
+    }
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                      reinterpret_cast<LPCWSTR>(&messages), &module);
+    if (drained) UnregisterClassW(kNativeClass, module);
+    else {
+        // A hung UI may still reach the WndProc. Keep its code mapped rather
+        // than unloading an outstanding callback; Windows releases it at exit.
+        HMODULE pinned = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                          reinterpret_cast<LPCWSTR>(&messages), &pinned);
+    }
+    if (stopEvent) CloseHandle(stopEvent);
+    hiding.store(false);
+    EnumWindows(visibility, 0);
+}
+}  // namespace magnifier
+
+#ifndef PINCH_ZOOM_NATIVE_TEST
 namespace native_gate {
 
 // ABI verified against Microsoft public symbols for Windows 11 build 26200.
@@ -1229,6 +1851,7 @@ struct State {
     unsigned device;
     Context context;
     bool started = false;
+    bool sawContacts = false;
 };
 std::map<void*, State> states;
 
@@ -1239,6 +1862,7 @@ HRESULT start(void* self, int x, int y, unsigned device, Context context) {
     GetPointerFrameInfo(device, &contacts, nullptr);
     const auto phase = contacts == 3 ? mapping.phase() : pinch::Phase::Swipe;
     State state{pinch::GestureGate(phase), x, y, device, context};
+    state.sawContacts = mapping.threeContacts();
     if (auto* record = mapping.get()) InterlockedExchange(&record->reserved,
         static_cast<LONG>(contacts | (static_cast<unsigned>(state.gate.mode()) << 8)));
     state.started = state.gate.mode() == pinch::GateMode::Forward;
@@ -1258,6 +1882,7 @@ HRESULT continueSwipe(void* self, int x, int y, int dx, int dy, unsigned device)
         if (const auto found = states.find(self); found != states.end()) {
             tracked = true;
             auto& current = found->second;
+            current.sawContacts = current.sawContacts || mapping.threeContacts();
             if (current.gate.update(mapping.phase()) == pinch::GateMode::Forward) {
                 deferredStart = !current.started;
                 current.started = true;
@@ -1288,7 +1913,8 @@ HRESULT finish(void* self, int x, int y, int dx, int dy, unsigned device) {
         }
     }
     if (!state) return originalFinish(self, x, y, dx, dy, device);
-    if (state->gate.finish(mapping.phase(true)) == pinch::GateMode::Suppress) return S_OK;
+    const auto finalPhase = state->sawContacts || mapping.threeContacts() ? mapping.phase(true) : pinch::Phase::Swipe;
+    if (state->gate.finish(finalPhase) == pinch::GateMode::Suppress) return S_OK;
     if (!state->started) {
         const HRESULT result = originalStart(self, state->x, state->y, state->device, state->context);
         if (FAILED(result)) return result;
@@ -1370,8 +1996,20 @@ pinch::Config settings() {
     config.enabled = Wh_GetIntSetting(L"enabled") != 0;
     config.observeOnly = Wh_GetIntSetting(L"observeOnly") != 0;
     config.sensitivity = std::clamp(Wh_GetIntSetting(L"sensitivity"), 25, 500) / 100.0;
+    config.acceleration = std::clamp(Wh_GetIntSetting(L"acceleration"), 0, 150) / 100.0;
+    config.invertPinch = Wh_GetIntSetting(L"invertPinch") != 0;
     config.threshold = std::clamp(Wh_GetIntSetting(L"threshold"), 2, 30) / 100.0;
-    config.maxZoom = std::clamp(Wh_GetIntSetting(L"maxZoom"), 100, 1000) / 100.0;
+    config.maxZoom = pinch::maximumZoom(Wh_GetIntSetting(L"maxZoom"));
+    config.keyboardInterop = Wh_GetIntSetting(L"keyboardInterop") != 0;
+    config.hideMagnifier = Wh_GetIntSetting(L"hideMagnifier") != 0;
+    config.keyboardStep = std::clamp(Wh_GetIntSetting(L"keyboardStep"), 0, 1000);
+    config.edgeMargin = std::clamp(Wh_GetIntSetting(L"edgeMargin"), 0, 40) / 100.0;
+    const auto follow = Wh_GetStringSetting(L"mouseFollow");
+    if (follow) {
+        if (wcscmp(follow, L"proportional") == 0) config.mouseFollow = 1;
+        else if (wcscmp(follow, L"fixed") == 0) config.mouseFollow = 2;
+        Wh_FreeStringSetting(follow);
+    }
     config.smoothingMs = std::clamp(Wh_GetIntSetting(L"smoothing"), 0, 250);
     config.fallbackAspect = std::clamp(Wh_GetIntSetting(L"fallbackHeight"), 20, 150) / 100.0;
     config.debug = Wh_GetIntSetting(L"debugLogging") != 0;
@@ -1416,14 +2054,31 @@ void stop() {
 BOOL Wh_ModInit() {
     DWORD session = 0;
     if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || !session) return FALSE;
+    wchar_t path[MAX_PATH];
+    if (!GetModuleFileNameW(nullptr, path, ARRAYSIZE(path))) return FALSE;
+    const wchar_t* leaf = wcsrchr(path, L'\\');
+    if (_wcsicmp(leaf ? leaf + 1 : path, L"magnify.exe") == 0) {
+        using GetVersion = LONG(WINAPI*)(OSVERSIONINFOW*);
+        const auto getVersion = reinterpret_cast<GetVersion>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+        OSVERSIONINFOW version{};
+        version.dwOSVersionInfoSize = sizeof(version);
+        if (!getVersion || getVersion(&version) != 0 || version.dwBuildNumber != 26200) return FALSE;
+        return magnifier::initialize();
+    }
     return native_gate::initialize();
 }
 void Wh_ModAfterInit() {
+    if (magnifier::role) { magnifier::afterInit(); return; }
     native_gate::ready();
     controller::start();
 }
 BOOL Wh_ModSettingsChanged(BOOL* reload) {
     *reload = FALSE;
+    if (magnifier::role) {
+        magnifier::hiding.store(Wh_GetIntSetting(L"hideMagnifier") != 0);
+        EnumWindows(magnifier::visibility, 0);
+        return TRUE;
+    }
     if (const HWND window = controller::window.load()) {
         const auto config = controller::settings();
         SendMessageW(window, runtime::kSettingsMessage, 0, reinterpret_cast<LPARAM>(&config));
@@ -1431,9 +2086,11 @@ BOOL Wh_ModSettingsChanged(BOOL* reload) {
     return TRUE;
 }
 void Wh_ModUninit() {
+    if (magnifier::role) { magnifier::stop(); return; }
     native_gate::stop();
     controller::stop();
 }
 
-#endif  // PINCH_ZOOM_STANDALONE
+#endif  // PINCH_ZOOM_NATIVE_TEST
+#endif  // Native adapter or Windhawk
 #endif  // PINCH_ZOOM_CORE_TEST

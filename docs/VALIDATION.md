@@ -1,6 +1,34 @@
 # Validación
 
-Fecha: 7 de noviembre de 2026.
+Fecha de 0.3.1: 8 de noviembre de 2026.
+
+## Estado de 0.3.1
+
+La ruta por interfaz con porcentajes enteros mostró tirones y desplazamiento del puntero; se desactivó y se restauraron las preferencias de Windows. La revisión posterior conserva el factor decimal en los fotogramas intermedios y usa la interfaz solo para entrar/salir de ampliación. Falta confirmar físicamente esta última ruta. Pasar los tests no acredita por sí solo la fluidez percibida.
+
+- Compilación x64 con Clang 20.1.3 de Windhawk 1.7.3 y `-Wall -Wextra -Werror`.
+- 48 pruebas del reconocedor: aceleración por velocidad, temporización HID, reversión en los límites, cambios de zoom por teclado, clasificación nativa y descarte del recorrido recibido durante el arranque.
+- 21 comprobaciones de runtime/ABI: incluyen adopción de zoom externo, recuperación al 100 %, anclas tras cambios externos y movimiento del puntero durante un pellizco en el modo API.
+- 20 comprobaciones del adaptador nativo con backend simulado: primado único, factores decimales distintos sin cuantización, una única escritura por solicitud, descarte de bases anteriores al primado/teclado, separación de cambios internos y comandos reales, hilo correcto, recuperación y cierre reentrante.
+- 5 pruebas de integración ejecutadas contra una iteración anterior de la Lupa real instalada: objetivo desde el controlador de pellizco, cambios rápidos, incremento por IPC desde el nivel del pellizco, vuelta al pellizco y recuperación al 100 %. Se comprueba el factor realmente renderizado con `MagGetFullscreenTransform`. El incremento por IPC no es una pulsación física de teclado.
+- Se ha instalado el mod en Explorer y Magnify; ambos auxiliares informan `READY`, con ventana oculta y sin error informado. El mod anterior `magnifier-headless` está desactivado y sigue instalado.
+- Se identificaron los nombres de las opciones en el binario de Magnify: FollowMouse (16), FollowFocus (17), FollowCaret (18), FollowNarrator (19) y FullScreenTrackingMode (29). Se confirmó por desensamblado que el modo 1 centra el ratón. Se retiró el experimento que invocaba directamente el actualizador de opciones tras una regresión. El mod final conserva las preferencias nativas de seguimiento.
+- La revisión independiente detectó y permitió corregir la doble ruta de escritura, cambios internos confundidos con teclado, reinicio por porcentajes repetidos y una carrera de descarga. La ventana de mensajes se destruye en su hilo; un cierre reentrante conserva el código de la DLL hasta terminar el proceso.
+- Los hooks de la Lupa no bloquean `MagSetFullscreenTransform` ni reemplazan el comportamiento de los atajos. La entrada/salida de ampliación usa `MagnifierUI::HandleSetZoomLevel(long)`; los factores decimales intermedios usan `FullscreenMagnifier::ChangeMagnificationFactor(float,CPoint*)`. Se exige que el hilo capturado de render coincida con el del callback antes de llamar a este método. Los hooks de comandos de interfaz observan cambios nativos para rebasar el reconocedor.
+- El usuario confirmó «Funciona bien» al alternar pellizco, Win+menos numérico y pellizco en la integración nativa anterior a los últimos ajustes de cierre/arranque.
+- Tras informar de reapertura con Win+Esc, se eliminó el reinicio automático. Tras informar de un salto al arrancar desde cerrada, se descartó el movimiento acumulado durante la espera y las solicitudes de una instancia anterior. El usuario confirmó después que Win+Esc permanece cerrado al dejar el touchpad y las teclas sin tocar durante cinco segundos. La latencia física de ese arranque sigue pendiente de confirmación; no se afirma que abrir Magnify sea instantáneo.
+
+## Pendiente en 0.3.1
+
+- Confirmación física del primer pellizco después de cerrar y de la ruta final de seguimiento.
+- Estabilidad del seguimiento y continuidad del factor de zoom: la ruta decimal revisada requiere confirmación física tras retirar la variante entera.
+- Cambios de ajustes desde la interfaz de Windhawk, incluida la ocultación reversible.
+- Los cuatro deslizamientos nativos, gestos de dos/cuatro dedos, bloqueo y suspensión en la versión final.
+- Monitores con DPI distintos y aplicaciones elevadas.
+
+Las pruebas de integración cambian brevemente el zoom y son optativas. No se ejecutan en CI ni por compilar. Las pruebas sintéticas no demuestran por sí solas la calidad de un touchpad físico.
+
+## Historial
 
 ## Estado de 0.2.0
 

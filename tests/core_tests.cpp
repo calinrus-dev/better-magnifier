@@ -28,7 +28,7 @@ std::vector<pinch::Contact> fingers(double scale = 1, double dx = 0, double dy =
             {22, {50 + dx, 30 + dy}},
             {33, {50 + 15 * scale + dx, 30 + dy}}};
 }
-pinch::Config config;
+pinch::Config config = [] { pinch::Config value; value.acceleration = 0; value.maxZoom = 4; return value; }();
 }
 
 int main() {
@@ -255,6 +255,103 @@ int main() {
     test("a short undecided native swipe is forwarded on release", [] {
         pinch::GestureGate gate;
         require(gate.finish(pinch::Phase::Idle) == pinch::GateMode::Forward, "short native swipe lost");
+    });
+    test("reversing a pinch at 100 percent responds on the next frame", [] {
+        pinch::Recognizer r;
+        r.update(fingers(), 0, 1, config);
+        r.update(fingers(0.9), 16, 1, config);
+        near(*r.update(fingers(0.7), 32, 1, config).zoom, 1);
+        require(*r.update(fingers(0.72), 48, 1, config).zoom > 1.02, "lower-bound dead zone");
+    });
+    test("reversing at the maximum does not require retracing excess finger travel", [] {
+        pinch::Recognizer r;
+        r.update(fingers(), 0, 3.9, config);
+        r.update(fingers(1.1), 16, 3.9, config);
+        near(*r.update(fingers(1.5), 32, 3.9, config).zoom, 4);
+        require(*r.update(fingers(1.45), 48, 4, config).zoom < 3.9, "upper-bound dead zone");
+    });
+    test("a keyboard change rebases an ongoing pinch without losing finger tracking", [] {
+        pinch::Recognizer r;
+        r.update(fingers(), 0, 1, config);
+        r.update(fingers(1.1), 16, 1, config);
+        r.adoptZoom(3);
+        near(*r.update(fingers(1.21), 32, 3, config).zoom, 3.3);
+    });
+    test("fast pinches gain more zoom for the same travel, while slow pinches stay precise", [] {
+        auto accelerated = config;
+        accelerated.acceleration = 0.35;
+        const auto run = [&](int interval) {
+            pinch::Recognizer r;
+            r.update(fingers(), 0, 1, accelerated);
+            r.update(fingers(1.05), interval, 1, accelerated);
+            double level = 1;
+            for (int i = 1; i <= 8; ++i) {
+                const double scale = 1.05 * std::pow(1.02, i);
+                level = *r.update(fingers(scale), (i + 1) * interval, level, accelerated, interval).zoom;
+            }
+            return level;
+        };
+        const double slow = run(100), fast = run(8);
+        near(slow, std::pow(1.02, 8));
+        require(fast > slow && fast < std::pow(slow, 1.351), "unbounded or missing acceleration");
+    });
+    test("acceleration can be disabled", [] {
+        auto linear = config;
+        linear.acceleration = 0;
+        pinch::Recognizer a, b;
+        a.update(fingers(), 0, 1, linear); b.update(fingers(), 0, 1, linear);
+        a.update(fingers(1.1), 10, 1, linear); b.update(fingers(1.1), 100, 1, linear);
+        near(*a.update(fingers(1.3), 20, 1, linear, 10).zoom,
+             *b.update(fingers(1.3), 200, 1, linear, 100).zoom);
+    });
+    test("no timestamp means no spurious acceleration from queued reports", [] {
+        auto accelerated = config;
+        accelerated.acceleration = 1.5;
+        pinch::Recognizer r;
+        r.update(fingers(), 0, 1, accelerated);
+        r.update(fingers(1.1), 10, 1, accelerated);
+        near(*r.update(fingers(1.2), 10, 1, accelerated, 0).zoom, 1.2 / 1.1);
+    });
+    test("HID scan timestamps preserve velocity when Windows batches input", [] {
+        pinch::FrameTiming clock;
+        clock.advance(100, 1000);
+        near(clock.advance(180, 1000.1), 8);
+        near(clock.advance(260, 1000.2), 8);
+    });
+    test("16-bit scan time wrap is handled", [] {
+        pinch::FrameTiming clock;
+        clock.advance(65520, 1000);
+        near(clock.advance(64, 1001), 8);
+    });
+    test("reversed pinch is optional and does not change native swipe classification", [] {
+        auto reversed = config;
+        reversed.invertPinch = true;
+        pinch::Recognizer r;
+        r.update(fingers(), 0, 2, reversed);
+        r.update(fingers(1.1), 16, 2, reversed);
+        require(*r.update(fingers(1.21), 32, 2, reversed).zoom < 2, "reverse direction ignored");
+    });
+    test("there is no artificial 400 percent cap unless configured", [] {
+        near(pinch::maximumZoom(0), 4096);
+        near(pinch::maximumZoom(400), 4);
+        near(pinch::maximumZoom(1200), 12);
+        auto unlimited = config;
+        unlimited.maxZoom = pinch::maximumZoom(0);
+        pinch::Recognizer r;
+        r.update(fingers(), 0, 5, unlimited);
+        r.update(fingers(1.1), 16, 5, unlimited);
+        require(*r.update(fingers(1.2), 32, 5, unlimited).zoom > 5, "hidden legacy cap");
+    });
+    test("waiting for native startup discards unrendered pinch travel", [] {
+        pinch::Recognizer r;
+        r.update(fingers(), 0, 1, config);
+        r.update(fingers(1.05), 16, 1, config);
+        for (int i = 1; i <= 8; ++i) {
+            r.update(fingers(1.05 + i * 0.04), 16 + i * 16, 1, config);
+            r.adoptZoom(1); // Host discards movement while the native app starts.
+        }
+        const double previous = 1.05 + 8 * 0.04;
+        near(*r.update(fingers(previous * 1.01), 160, 1, config).zoom, 1.01);
     });
     std::cout << passed << " tests passed\n";
 }

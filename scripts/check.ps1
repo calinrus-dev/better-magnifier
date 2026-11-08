@@ -45,7 +45,7 @@ Invoke-Compile 'core-tests' ($common + @((Join-Path $projectRoot 'tests\core_tes
 & $testExe
 if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas ($LASTEXITCODE)." }
 
-$links = @('-lhid', '-lwtsapi32', '-lshell32', '-luser32')
+$links = @('-lhid', '-lwtsapi32', '-lshell32', '-luser32', '-ladvapi32')
 $hostExe = Join-Path $buildPath 'pinch-zoom-host.exe'
 Invoke-Compile 'host' ($common + @('-DPINCH_ZOOM_STANDALONE', '-municode', $source, '-o', $hostExe) + $links)
 Invoke-Compile 'mod' ($common + @('-shared', '-Wl,--export-all-symbols', '-DWH_MOD', ('-DWH_MOD_ID=L"' + $id + '"'),
@@ -56,6 +56,15 @@ Invoke-Compile 'runtime-tests' ($common + @('-municode', (Join-Path $projectRoot
     '-o', $runtimeTest) + $links)
 & $runtimeTest (Join-Path $buildPath 'kde-pinch-zoom.dll')
 if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas de runtime/ABI ($LASTEXITCODE)." }
+$adapterTest = Join-Path $buildPath 'native-adapter-tests.exe'
+Invoke-Compile 'native-adapter-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_adapter_tests.cpp'),
+    '-o', $adapterTest) + $links)
+& $adapterTest
+if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas del adaptador nativo ($LASTEXITCODE)." }
+Invoke-Compile 'native-integration' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_integration.cpp'),
+    '-o', (Join-Path $buildPath 'native-integration.exe')) + $links)
+Invoke-Compile 'native-performance' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_performance.cpp'),
+    '-o', (Join-Path $buildPath 'native-performance.exe')) + $links)
 
 if ($Diagnose) {
     & $hostExe --diagnose --seconds 3
@@ -65,4 +74,7 @@ if ($SmokeZoom) {
     & $hostExe --smoke-zoom
     if ($LASTEXITCODE -ne 0) { throw "Ha fallado la prueba de ampliacion ($LASTEXITCODE)." }
 }
+$buildInfo = @{ version=$version; sourceSha256=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash;
+    dllSha256=(Get-FileHash -LiteralPath (Join-Path $buildPath 'kde-pinch-zoom.dll') -Algorithm SHA256).Hash }
+[IO.File]::WriteAllText((Join-Path $buildPath 'build-info.json'), ($buildInfo | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 Write-Host 'Correcto: reconocedor, runtime/ABI, host de diagnostico y DLL x64 de Windhawk.'
