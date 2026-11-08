@@ -2,6 +2,24 @@
 
 Fecha de revisión: 8 de noviembre de 2026.
 
+## Estado de 0.5.0
+
+- 65 pruebas del núcleo, 33 del runtime/ABI, 56 del adaptador nativo y 18 del filtro del shell: 172 en total. Backend simulado, sin cambiar el escritorio.
+- La rueda se prueba con deltas fraccionarios, acumulación de ráfagas, trayectoria intermedia decimal, finalización, inversión, límites y cancelación.
+- El host real se prueba con backend falso: rechaza eventos anteriores al pellizco/reset o a un cambio de teclado, conserva varias muescas nuevas de la misma revisión y no convierte un evento de despertar en zoom retrasado.
+- El callback nativo de rueda se prueba con entrega correcta/fallida, opt-out, host ausente y multitarea. Se comprueba que no aplique un segundo zoom nativo.
+- Las pruebas de sesión separan conexión, bloqueo y suspensión. Las de arranque cubren límites de reintentos, recuperación por nueva entrada, Win+Esc y reconstrucción temporal del renderizador.
+- La función MagnifierUI::HandleMouseWheelZoom(int) y el uso de delta/120 se verificaron contra símbolos públicos y desensamblado del Magnify de este equipo.
+- Servicio Windhawk observado en ejecución e inicio automático. No se ha reiniciado Windows, cerrado la sesión ni suspendido físicamente el equipo durante esta revisión.
+
+Instalada con ambos componentes READY, DLL verificada por SHA-256 y controlador perteneciente al Explorer principal. Se detectó un segundo Explorer de carpetas y se excluyó para que no compita por el estado compartido ni los atajos de recuperación. La recuperación de UI/renderizadores preexistentes se prueba con callbacks falsos sin escribir el zoom.
+
+El usuario confirmó Ctrl+Alt+rueda fluido, inversión y alternancia con pellizco/teclado sin los fallos consultados. También confirmó Win+Esc cerrado durante cinco segundos y respuesta al nuevo gesto. Es confirmación física de este equipo; no certifica estabilidad prolongada.
+
+Muestra pasiva de 5,03 segundos: Explorer principal consumió 0,31 % de un núcleo y Magnify 0,00 %. Sus conjuntos de trabajo fueron 549,9 MiB y 195,1 MiB; los handles variaron −33 y 0. Son procesos completos, no el coste aislado del mod, y esta muestra no mide latencia durante rueda ni demuestra ausencia de fugas.
+
+Pendiente: sesión nueva tras reiniciar Windows, suspensión física y otros equipos/pantallas. No se han ejecutado oscilaciones sintéticas visibles.
+
 ## Estado de 0.4.0
 
 La revisión está compilada e instalada en el equipo de desarrollo. El diagnóstico informa READY para el filtro del shell y la Lupa nativa, sin error de inicialización. El hash SHA-256 de la DLL instalada coincide con el artefacto compilado. El usuario confirmó en este equipo el pellizco lento y sostenido sin los fallos observados, la alternancia con Win + «+»/«−», el cambio lateral directo, los gestos arriba/abajo y la restauración del nivel y la posición al salir de multitarea.

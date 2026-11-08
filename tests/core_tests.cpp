@@ -376,5 +376,89 @@ int main() {
         require(pinch::swipeDirection({0.5, -4}) == -2, "up was interpreted as lateral");
         require(pinch::swipeDirection({0.5, 4}) == 2, "down was interpreted as lateral");
     });
+    test("wheel retains high resolution deltas proportionally", [] {
+        pinch::WheelMotion a, b;
+        a.add(120, 2, 0, 15, 100, 16);
+        for (int i = 0; i < 4; ++i) b.add(30, 2, 0, 15, 100, 16);
+        near(a.goal(), b.goal()); near(a.goal(), 2.3);
+    });
+    test("wheel publishes decimal intermediate frames and finishes", [] {
+        pinch::WheelMotion w; w.add(120, 1, 10, 15, 100, 16);
+        const double middle = *w.tick(60);
+        require(middle > 1 && middle < 1.15, "wheel still jumps to its final level");
+        near(*w.tick(110), 1.15);
+        require(!w.active() && !w.tick(126), "wheel timer would continue indefinitely");
+    });
+    test("successive wheel notches accumulate from their goal", [] {
+        pinch::WheelMotion w; w.add(120, 2, 0, 15, 100, 16);
+        w.tick(16); w.add(240, 2.1, 16, 15, 100, 16);
+        near(w.goal(), 2 * std::pow(1.15, 3));
+    });
+    test("wheel reversal drops the old direction immediately", [] {
+        pinch::WheelMotion w; w.add(360, 3, 0, 15, 100, 16);
+        const double before = *w.tick(25);
+        w.add(-120, before, 25, 15, 100, 16);
+        require(*w.tick(40) < before && w.goal() < before, "old momentum continued after reversing wheel");
+    });
+    test("wheel limit does not accumulate invisible momentum", [] {
+        pinch::WheelMotion w; w.add(32767, 15, 0, 100, 40, 16);
+        near(*w.tick(40), 16);
+        w.add(-30, 16, 40, 15, 100, 16);
+        require(w.goal() < 16 && *w.tick(56) < 16, "cannot leave upper limit immediately");
+        w.add(-32768, 1, 200, 100, 100, 16); near(*w.tick(300), 1);
+        w.add(30, 1, 300, 15, 100, 16); require(w.goal() > 1, "cannot leave lower limit");
+    });
+    test("wheel cancellation cannot replay the old goal", [] {
+        pinch::WheelMotion w; w.add(120, 2, 0, 15, 100, 16); w.cancel();
+        require(!w.tick(20), "cancelled trajectory still publishes frames");
+        w.add(-120, 5, 30, 15, 100, 16); near(w.goal(), 5 / 1.15);
+    });
+    test("wheel negative and fractional movement share the same scale", [] {
+        pinch::WheelMotion w; w.add(-60, 2, 0, 15, 100, 16);
+        near(w.goal(), 2 / std::sqrt(1.15));
+        w.add(0, 2, 0, 15, 100, 16); require(std::isfinite(w.goal()), "invalid wheel goal");
+    });
+    test("interactive session stays inactive across lock suspend resume", [] {
+        pinch::InteractiveSession session; require(!session.active(), "unknown session must not accept zoom input");
+        session.snapshot(true, true); require(session.active(), "unlocked session stays inactive");
+        session.lock(); session.suspend(); session.resume();
+        require(!session.active(), "resume accidentally unlocked a locked session");
+        session.snapshot(true, false); require(!session.active(), "locked session snapshot accepted input");
+        session.unlock(); require(session.active(), "unlock cannot recover input");
+    });
+    test("a connection is not an unlock", [] {
+        pinch::InteractiveSession session; session.snapshot(true, true); session.lock();
+        session.disconnect(); session.connect(); require(!session.active(), "reconnect bypasses lock");
+        session.unlock(); require(session.active(), "unlocked reconnect stays inactive");
+        session.disconnect(); require(!session.active(), "disconnected session keeps zoom active");
+    });
+    test("native launch has bounded retries with a cooldown", [] {
+        pinch::NativeLaunchPolicy launch;
+        require(launch.mayLaunch(0), "fresh login does not prewarm Magnifier");
+        launch.attempted(0); require(!launch.mayLaunch(1), "zero uptime bypasses launch cooldown");
+        require(launch.mayLaunch(1500), "cooldown never recovers"); launch.attempted(1500);
+        launch.attempted(3000); require(!launch.mayLaunch(9000), "failed launch retries forever");
+        launch.request(); require(launch.mayLaunch(9000), "fresh physical input cannot retry after temporary startup failure");
+    });
+    test("Win Esc prevents automatic reopen until fresh physical input", [] {
+        pinch::NativeLaunchPolicy launch; launch.observe(true, true);
+        require(launch.observe(false, false), "native exit not detected");
+        require(!launch.mayLaunch(9000), "closed Magnifier reopens from the timer");
+        launch.resetAttempts(); require(!launch.mayLaunch(10000), "resume or settings reopened closed Magnifier");
+        launch.request(); require(launch.mayLaunch(10000), "fresh pinch cannot reopen Magnifier");
+    });
+    test("renderer rebuild is not a native process exit", [] {
+        pinch::NativeLaunchPolicy launch; launch.observe(true, true);
+        require(!launch.observe(false, true), "rebuilding renderer treated as an exit");
+        launch.observe(true, true);
+        require(launch.observe(false, false), "exit lost after renderer recovery");
+    });
+    test("clean close before native READY does not reopen from startup retries", [] {
+        pinch::NativeLaunchPolicy launch; launch.attempted(100);
+        launch.observe(false, true);
+        require(launch.observe(false, false, true), "early clean close not detected");
+        require(!launch.mayLaunch(9000), "Win Esc before READY still causes startup retries");
+        launch.request(); require(launch.mayLaunch(9000), "fresh physical input cannot recover after early close");
+    });
     std::cout << passed << " tests passed\n";
 }

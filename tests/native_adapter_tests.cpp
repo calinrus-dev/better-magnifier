@@ -22,6 +22,17 @@ BOOL WINAPI clipBackend(const RECT* rectangle) { if (rectangle) ++clipLimits; el
 BOOL WINAPI readView(float* level, int* x, int* y) { *level = static_cast<float>(visibleView.zoom); *x = visibleView.x; *y = visibleView.y; return TRUE; }
 void moveView(void*, const RECT* rectangle, bool animated) { restoredTarget = animated; ++cameraMoves; visibleView.x = rectangle->left; visibleView.y = rectangle->top; }
 void rendererCommand(void* self, int) { magnifier::change(self, 3.7f, nullptr); magnifier::option(self, 14, 100, false); }
+int originalWheelCalls = 0, wheelPosts = 0, postedDelta = 0;
+LONG postedRevision = 0;
+bool wheelPostSuccess = true;
+void nativeWheel(void*, int) { ++originalWheelCalls; }
+BOOL WINAPI wheelPost(HWND, UINT message, WPARAM w, LPARAM l) {
+    if (message != runtime::kWheelMessage) return FALSE;
+    ++wheelPosts; postedDelta = static_cast<int>(w); postedRevision = static_cast<LONG>(l);
+    return wheelPostSuccess;
+}
+LRESULT CALLBACK windowBackend(HWND, UINT, WPARAM, LPARAM) { return 321; }
+LONG_PTR WINAPI existingObject(HWND, int index) { return index == GWLP_USERDATA ? 0x6789 : 0; }
 HRESULT keeper(void** result) { *result = reinterpret_cast<void*>(0x1000); return S_OK; }
 long optionValue(void*, int name) { return name == 14 ? percent : name == 20 ? 100 : 2; }
 void cache(void*, int name, long value, bool save) {
@@ -237,5 +248,63 @@ int wmain() {
     magnifier::uiLevel(reinterpret_cast<void*>(0x1000), 150);
     require(magnifier::nativeUi.load() == reinterpret_cast<void*>(0x1000),
             "a native keyboard or UI command can recover a context injected after startup");
+    magnifier::originalWheel = nativeWheel;
+    magnifier::postWheel = wheelPost;
+    state.hostWindow = 0x1234;
+    state.wheelEnabled = 1; state.controlEnabled = 1; state.enabled = 1;
+    state.heartbeat = static_cast<LONG64>(GetTickCount64()); state.shellMask = 0;
+    state.inputRevision = 42;
+    magnifier::wheel(reinterpret_cast<void*>(0x1000), -30);
+    require(wheelPosts == 1 && postedDelta == -30 && postedRevision == 42 && originalWheelCalls == 0,
+            "native wheel posts one signed high-resolution event without a second native zoom");
+    state.enabled = 0;
+    magnifier::wheel(nullptr, 30);
+    require(wheelPosts == 2 && originalWheelCalls == 0,
+            "mouse-only wheel input still works after a reset without a new touchpad frame");
+    state.enabled = 1;
+    state.wheelEnabled = 0;
+    magnifier::wheel(nullptr, 120);
+    require(originalWheelCalls == 1 && wheelPosts == 2, "wheel opt-out restores native shortcut behavior");
+    state.wheelEnabled = 1; wheelPostSuccess = false;
+    magnifier::wheel(nullptr, 120);
+    require(originalWheelCalls == 2, "failed wheel delivery preserves native behavior");
+    wheelPostSuccess = true; state.heartbeat = static_cast<LONG64>(GetTickCount64() - 500);
+    magnifier::wheel(nullptr, 120);
+    require(originalWheelCalls == 3, "an unavailable host cannot swallow the native wheel shortcut");
+    state.heartbeat = static_cast<LONG64>(GetTickCount64());
+    const int postedBeforeOverview = wheelPosts;
+    state.shellMask = 1; magnifier::wheel(nullptr, 120);
+    require(wheelPosts == postedBeforeOverview && originalWheelCalls == 3, "wheel cannot magnify the overview");
+    state.shellMask = 0;
+    state.wheelActive = 1; state.down = 0;
+    const int warpsBeforeWheel = cursorWarps, clipsBeforeWheel = clipLimits;
+    magnifier::moveMouse(nullptr, POINT{10, 20}); magnifier::clipCursor(&limiting);
+    require(cursorWarps == warpsBeforeWheel && clipLimits == clipsBeforeWheel,
+            "deferred pointer warps and clipping are suppressed between wheel animation ticks");
+    const LONG beforeWheelKey = state.inputRevision;
+    magnifier::zoomCommand(reinterpret_cast<void*>(0x1000), 0x800A);
+    require(state.inputRevision != beforeWheelKey && !state.wheelActive && cursorWarps == warpsBeforeWheel + 1,
+            "native keyboard cancels pending wheel epoch and retains native pointer behavior");
+    const LONG beforeExternal = state.inputRevision;
+    magnifier::change(reinterpret_cast<void*>(0x2000), 4.2f, nullptr);
+    require(state.inputRevision != beforeExternal, "external renderer changes invalidate old wheel input");
+    magnifier::originalUiWindowProc = windowBackend;
+    magnifier::originalFullWindowProc = windowBackend;
+    magnifier::windowData = existingObject;
+    magnifier::nativeUi.store(nullptr); magnifier::nativeSelf.store(nullptr);
+    magnifier::messageWindow.store(reinterpret_cast<HWND>(0x5678));
+    visibleView = {2.731, 50, 60};
+    const int writesBeforeRecovery = directWrites;
+    require(magnifier::uiWindowProc(nullptr, WM_NULL, 0, 0) == 321 &&
+            magnifier::nativeUi.load() == reinterpret_cast<void*>(0x6789),
+            "a pre-existing UI window recovers its context without a synthetic zoom command");
+    require(magnifier::fullWindowProc(nullptr, WM_NULL, 0, 0) == 321 &&
+            magnifier::nativeSelf.load() == reinterpret_cast<void*>(0x6789) && state.magnifierReady && state.nativeLevel == 27310 &&
+            directWrites == writesBeforeRecovery && visibleView.x == 50 && visibleView.y == 60,
+            "a pre-existing renderer is adopted without rounding its factor or moving its viewport");
+    const LONG recoveredEpoch = state.inputRevision;
+    magnifier::fullWindowProc(nullptr, WM_NULL, 0, 0);
+    require(state.inputRevision == recoveredEpoch, "repeated harmless window messages do not reset wheel or pinch motion");
+    magnifier::messageWindow.store(nullptr);
     std::cout << checks << " native adapter checks passed; fake backend; desktop unchanged\n";
 }

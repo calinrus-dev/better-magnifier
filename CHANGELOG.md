@@ -1,5 +1,14 @@
 # Cambios
 
+## 0.5.0 — 2026-11-08 (experimental)
+
+- Nuevo nombre: Better Magnifier. Conserva el identificador del mod para actualizar instalaciones previas.
+- Ctrl+Alt+rueda con recorrido proporcional, deltas de alta resolución y transición decimal finita. Sensibilidad y duración configurables.
+- Teclado, pellizco, multitarea, pausa y cambios de sesión invalidan la trayectoria y los eventos antiguos de rueda. Protección del puntero durante los intervalos entre fotogramas.
+- La Lupa nativa procesa cada evento una sola vez; el hook global solo despierta una Lupa cerrada y no reproduce recorrido antiguo.
+- Carga temprana del módulo del shell, reintentos acotados y separación entre bloqueo y suspensión. Win+Esc mantiene la Lupa cerrada hasta una nueva entrada física.
+- 172 comprobaciones automáticas locales. El usuario confirmó rueda fluida, alternancia de entradas y cierre/reapertura. La comprobación tras reiniciar Windows queda pendiente.
+
 ## 0.4.0 — 2026-11-08 (experimental)
 
 - Cambio directo de ventana con los deslizamientos laterales, configurable, una ventana por gesto y sin perfiles de zoom por ventana.

@@ -1,16 +1,18 @@
-# KWin-inspired Accessible Pinch Zoom
+# Better Magnifier
 
-*An experimental accessibility mod for Windhawk: KWin-inspired three-finger pinch zoom powered by Windows Magnifier.*
+*An experimental accessibility mod for Windhawk: smooth pinch and Ctrl+Alt+mouse-wheel zoom, inspired by KWin and powered by Windows Magnifier.*
 
-Un proyecto de **accesibilidad para Windows**, inspirada en el efecto de zoom de **KWin / KDE Plasma**. Permite ampliar todo el escritorio con un **pellizco de tres dedos**, usando el motor de la Lupa de Windows. Abre los dedos para acercar y ciérralos para alejar. Puedes alternarlo con **Win + «+» / «−»**, también en el teclado numérico.
+Un proyecto de **accesibilidad para Windows**, inspirado en el efecto de zoom de **KWin / KDE Plasma**. Permite ampliar todo el escritorio con un **pellizco de tres dedos**, usando el motor de la Lupa de Windows. Abre los dedos para acercar y ciérralos para alejar. Puedes alternarlo con **Win + «+» / «−»**, también en el teclado numérico.
 
-**0.4.0 experimental, comprobada en el touchpad del equipo de desarrollo.** Incorpora cambio lateral directo, zoom global y suspensión al 100 % en multitarea/escritorio. Corrige rutas que podían provocar parpadeos y recolocar el puntero en pellizcos lentos. El usuario confirmó el pellizco lento, la alternancia con teclado y los gestos de ventanas. La compatibilidad con otros equipos sigue pendiente.
+**0.5.0 experimental.** Añade Ctrl+Alt+rueda con transiciones continuas y sensibilidad configurable, y refuerza el inicio de sesión y la recuperación. El usuario confirmó en el equipo de desarrollo la rueda fluida, su alternancia con pellizco y teclado y el cierre/reapertura. La comprobación tras reiniciar Windows y la compatibilidad con otros equipos siguen pendientes.
 
 Requiere Windows 11 x64, compilación **26200**, y Windhawk **1.7.3**. Los símbolos privados de Windows pueden cambiar con una actualización. El mod conserva la configuración de gestos del touchpad.
 
 Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantalla con menos cambios entre touchpad y teclado. Proyecto independiente, sin afiliación con KDE o Microsoft.
 
 ## Comportamiento
+
+- **Ctrl+Alt+rueda** amplía o reduce de forma continua. Cada muesca aplica un cambio proporcional (15 % por defecto); una rueda de alta resolución conserva los deltas pequeños. Las ráfagas suman recorrido y cambiar de sentido cancela el impulso anterior. La rueda sin esa combinación conserva su función normal.
 
 - Distingue el pellizco del movimiento de los tres dedos juntos. Los gestos de dos y cuatro dedos conservan su comportamiento.
 - Un deslizamiento horizontal de tres dedos cambia directamente de ventana, una por gesto, sin navegar por un selector: izquierda siguiente, derecha anterior. Es configurable. Filtra ventanas ocultas, auxiliares y cloaked, y conserva una secuencia para que los gestos sucesivos recorran más de dos ventanas.
@@ -27,6 +29,10 @@ Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantall
 ## Ajustes
 
 En la pestaña **Ajustes** del mod:
+
+- **Smooth Ctrl+Alt+mouse wheel zoom:** activado por defecto. Desactivarlo conserva el zoom por rueda de Windows.
+- **Wheel zoom per notch:** 15 % por defecto, ajustable entre 1 y 100 %.
+- **Wheel transition time:** 100 ms por defecto, ajustable entre 40 y 250 ms.
 
 - **Zoom sensitivity:** 100 % por defecto, seguimiento proporcional a la separación.
 - **Pinch acceleration:** 35 % por defecto; 0 desactiva la aceleración.
@@ -55,10 +61,18 @@ Después de compilar también puedes ejecutar `scripts/install-local.ps1` en Pow
 
 `-Disable` desactiva este mod. `-Acceleration 35 -MaximumZoom 0` permite cambiar esos dos ajustes explícitamente. El resultado queda en `build/install-result.json`. El instalador comprueba `build/build-info.json` para evitar instalar una DLL que no corresponda al código.
 
+### Inicio de Windows
+
+El mod se carga en Explorer mediante Windhawk. Mantén Windhawk habilitado al inicio; en la instalación estándar su servicio debe estar en inicio automático. No hace falta abrir la interfaz del mod en cada sesión. Al arrancar se prepara la Lupa oculta al 100 %. Una carga temprana de Explorer solicita el componente del shell desde System32 si todavía no estaba cargado.
+
+Win+Esc cierra la Lupa y no se reabre por un temporizador. Un pellizco nuevo o Ctrl+Alt+rueda puede abrirla otra vez. Si estaba cerrada, la primera entrada de rueda la despierta; el movimiento recibido antes de estar lista se descarta para evitar saltos al terminar de cargar símbolos. Sigue girando la rueda cuando esté preparada. La primera resolución de símbolos puede tardar.
+
+Bloqueo, suspensión y desconexión invalidan la entrada pendiente. Al reanudar se comprueba que la sesión esté activa y desbloqueada. Los intentos de apertura tienen un intervalo mínimo y un límite; una entrada física nueva permite recuperarse de un fallo temporal. El instalador conserva el identificador `local@kde-pinch-zoom` y el archivo de fuente para actualizar las instalaciones anteriores de Better Magnifier.
+
 ## Recuperación y diagnóstico
 
 - **Ctrl+Alt+Mayús+F10:** solicitar el 100 %.
-- **Ctrl+Alt+Mayús+F9:** pausar/reanudar el pellizco, volviendo al 100 % al pulsarlo.
+- **Ctrl+Alt+Mayús+F9:** pausar/reanudar el pellizco y la rueda, volviendo al 100 % al pulsarlo.
 - **Win+Esc:** cerrar la Lupa.
 - Al descargar el mod, la Lupa nativa puede continuar abierta; sus controles se vuelven visibles y los atajos siguen siendo de Windows.
 
@@ -72,7 +86,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 
 Para Windhawk portátil añade `-WindhawkPath 'D:\Herramientas\Windhawk'`. Se generan la DLL, el host de diagnóstico y las pruebas en `build/`. El script no instala ni activa mods, no inicia Windhawk y no cambia el zoom.
 
-La compilación ejecuta 52 pruebas del reconocedor, 21 del runtime/ABI, 44 del adaptador nativo y 18 del filtro de gestos del shell con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
+La compilación ejecuta 65 pruebas del núcleo, 33 del runtime/ABI, 56 del adaptador nativo y 18 del filtro de gestos del shell con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
 
 ```powershell
 .\build\native-integration.exe --live
