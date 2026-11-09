@@ -520,12 +520,12 @@ int main() {
     });
     test("the stronger default wheel gain preserves high-resolution precision", [] {
         const pinch::Config defaults;
-        require(defaults.wheelStep == 35, "factory wheel gain differs from the documented profile");
+        require(defaults.wheelStep == 50 && defaults.wheelFreeSpinMaxRate == 1000, "factory wheel gain differs from the documented profile");
         pinch::WheelMotion a, b, c;
         a.add(120, 2, 100, defaults.wheelStep, 100, 16, 400);
         for (int i=0; i<4; ++i) b.add(30, 2, 100, defaults.wheelStep, 100, 16, 400);
         for (int i=0; i<120; ++i) c.add(1, 2, 100, defaults.wheelStep, 100, 16, 400);
-        near(a.goal(), 2.7); near(a.goal(), b.goal()); near(a.goal(), c.goal());
+        near(a.goal(), 3.0); near(a.goal(), b.goal()); near(a.goal(), c.goal());
     });
     test("free wheel speed and lookahead are bounded and finish without hidden debt", [] {
         pinch::WheelMotion w; w.add(32767, 1, 100, 20, 100, 16, 400);

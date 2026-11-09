@@ -12,7 +12,7 @@ Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantall
 
 ## Comportamiento
 
-- **Win+rueda** amplía o reduce de forma continua. Cada muesca aplica un cambio proporcional (35 % por defecto); una rueda de alta resolución conserva los deltas pequeños. Los giros rápidos se detectan por volumen reciente, conservan como máximo 40 ms de recorrido pendiente y usan un límite de velocidad separado. El exceso se descarta para evitar una cola larga tras frenar; no se extrapola sin nuevos eventos. Cambiar de sentido cancela el impulso anterior. Una trayectoria nueva aprovecha hasta 16 ms del tiempo real de captura, evitando un frame inicial vacío; no simula Win+«+» ni añade un aumento mínimo artificial. La rueda sin esa combinación conserva su función normal.
+- **Win+rueda** amplía o reduce de forma continua. Cada muesca aplica un cambio proporcional (50 % por defecto); una rueda de alta resolución conserva los deltas pequeños. Los giros rápidos se detectan por volumen reciente, conservan como máximo 40 ms de recorrido pendiente y usan un límite de velocidad separado. El exceso se descarta para evitar una cola larga tras frenar; no se extrapola sin nuevos eventos. Cambiar de sentido cancela el impulso anterior. Una trayectoria nueva aprovecha hasta 16 ms del tiempo real de captura, evitando un frame inicial vacío; no simula Win+«+» ni añade un aumento mínimo artificial. La rueda sin esa combinación conserva su función normal.
 
 - **Win+clic central** vuelve rápidamente al 100 %. **Ctrl+Alt+rueda** selecciona la ventana anterior al girar hacia arriba y la siguiente al girar hacia abajo, sin desplegar un selector. Conserva cada muesca de una ráfaga, confirma la ventana activada antes de avanzar y descarta el recorrido pendiente al invertir. La cola está limitada a seis pasos y 200 ms para una rueda libre.
 - **Ctrl+Alt+clic central** maximiza/restaura y **Ctrl+Alt+clic derecho** minimiza la ventana actual únicamente si activas **Extra Ctrl+Alt mouse window actions**. Esas acciones adicionales están desactivadas por defecto.
@@ -38,10 +38,10 @@ En la pestaña **Ajustes** del mod:
 - **Ctrl+Alt + mouse wheel switches windows:** activado por defecto en el perfil Win.
 - **Extra Ctrl+Alt mouse window actions:** desactivado por defecto.
 - **Disable Magnifier click-to-read and its reading cursor:** activado por defecto en el binario verificado. Evita nuevas activaciones de Ctrl+Alt+clic izquierdo y de su cursor de lectura. No desactiva Narrador ni otros atajos de lectura de la Lupa. Si el modo de lectura ya estaba activo al cambiar el ajuste, sal de él o vuelve a abrir la Lupa.
-- **Wheel zoom per notch:** 35 % por defecto, ajustable entre 1 y 100 %.
+- **Wheel zoom per notch:** 50 % por defecto, ajustable entre 1 y 100 %.
 - **Wheel transition time:** 100 ms por defecto, ajustable entre 40 y 250 ms.
 - **Maximum normal wheel zoom growth per second:** 400 % de crecimiento por segundo por defecto (hasta multiplicar por cinco en un segundo), para movimientos normales y de precisión.
-- **Maximum free-spinning wheel zoom growth per second:** 700 % por defecto (hasta multiplicar por ocho en un segundo) para ráfagas rápidas, con transición y recorrido pendiente de 40 ms. Usa el mayor de este límite y el normal; `0` desactiva la adaptación. Se detecta por unidades de rueda, no por número de eventos: subdividir una muesca en deltas pequeños no aumenta su ganancia. Este tiempo corresponde a la trayectoria del mod, no a una garantía de latencia física de Windows o de la pantalla.
+- **Maximum free-spinning wheel zoom growth per second:** 1000 % por defecto (hasta multiplicar por once en un segundo) para ráfagas rápidas, con transición y recorrido pendiente de 40 ms. Usa el mayor de este límite y el normal; `0` desactiva la adaptación. Se detecta por unidades de rueda, no por número de eventos: subdividir una muesca en deltas pequeños no aumenta su ganancia. Este tiempo corresponde a la trayectoria del mod, no a una garantía de latencia física de Windows o de la pantalla.
 - **Suppress Magnifier startup feedback cursor:** activado por defecto. Pide a Windows que omita el indicador azul al abrir la Lupa desde el mod; es una petición opcional que no impide abrirla si Windows la rechaza.
 
 - **Zoom sensitivity:** 100 % por defecto, seguimiento proporcional a la separación.
@@ -74,7 +74,7 @@ Después de compilar también puedes ejecutar `scripts/install-local.ps1` en Pow
 
 Con el paquete `better-magnifier-0.7.5-windows-x64.zip`, extráelo completo y ejecuta ese script desde su carpeta en una consola de administrador; los binarios ya están compilados. Conserva las carpetas `build`, `mods` y `scripts` juntas. Para actualizar desde una versión anterior, usa el mismo mod local: el identificador sigue siendo `local@kde-pinch-zoom`, aunque el nombre visible sea Better Magnifier. Las revisiones intermedias 0.7.1–0.7.4 no se publicaron como releases.
 
-`-Disable` desactiva este mod. `-WheelStep 35` actualiza explícitamente la sensibilidad de una instalación existente; sus otros ajustes se conservan. `-Acceleration 35 -MaximumZoom 0` permite cambiar esos dos ajustes explícitamente. El resultado queda en `build/install-result.json`. El instalador comprueba `build/build-info.json` para evitar instalar una DLL que no corresponda al código.
+`-Disable` desactiva este mod. `-WheelStep 50 -WheelFreeSpinMaxRate 1000` actualiza explícitamente la ganancia y el límite rápido de una instalación existente; sus otros ajustes se conservan. `-Acceleration 35 -MaximumZoom 0` permite cambiar esos dos ajustes explícitamente. El resultado queda en `build/install-result.json`. El instalador comprueba `build/build-info.json` para evitar instalar una DLL que no corresponda al código.
 
 ### Inicio de Windows
 
@@ -109,7 +109,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 
 Para Windhawk portátil añade `-WindhawkPath 'D:\Herramientas\Windhawk'`. Se generan la DLL, el host de diagnóstico y las pruebas en `build/`. El script no instala ni activa mods, no inicia Windhawk y no cambia el zoom.
 
-La compilación ejecuta **701 comprobaciones** del reconocedor, perfiles de ratón, runtime/ABI, adaptador nativo, filtro del shell, lanzamiento y teclado progresivo con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
+La compilación ejecuta **705 comprobaciones** del reconocedor, perfiles de ratón, runtime/ABI, adaptador nativo, filtro del shell, lanzamiento y teclado progresivo con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
 
 ```powershell
 .\build\native-integration.exe --live

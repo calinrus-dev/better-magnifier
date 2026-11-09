@@ -687,7 +687,7 @@ int wmain(int argc, wchar_t** argv) {
         HostFixture fixture(230,{1,0,0}); auto& record=fixture.record;
         runtime::HostTestAccess::nativeBackend(fixture.host,record);
         bridge::enqueueWheel(&record,1200,230,1000); runtime::HostTestAccess::tick(fixture.host,1016);
-        require(record.requestedLevel>10261 && record.requestedLevel<=10339 &&
+        require(record.requestedLevel>10261 && record.requestedLevel<=std::ceil(std::pow(1 + pinch::Config{}.wheelFreeSpinMaxRate / 100.0, 0.016) * 10000) &&
                 record.requestSource==static_cast<LONG>(bridge::InputSource::Wheel),
                 "the host opts into the explicit fast cap while retaining a typed native wheel request");
         runtime::HostTestAccess::tick(fixture.host,1032); runtime::HostTestAccess::tick(fixture.host,1048);

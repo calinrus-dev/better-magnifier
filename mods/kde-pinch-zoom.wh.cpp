@@ -87,7 +87,7 @@ https://github.com/calinrus-dev/better-magnifier
 - disableReading: true
   $name: Disable Magnifier click-to-read and its reading cursor
   $description: Blocks Magnifier Ctrl+Alt + left-click reading and its special cursor on verified builds. Does not disable Narrator or intercept ordinary left clicks.
-- wheelStep: 35
+- wheelStep: 50
   $name: Wheel zoom per notch (%)
   $description: Proportional change per 120 wheel units. High-resolution wheel deltas retain their precision.
 - wheelDuration: 100
@@ -96,9 +96,9 @@ https://github.com/calinrus-dev/better-magnifier
 - wheelMaxRate: 400
   $name: Maximum normal wheel zoom growth per second (%)
   $description: 400 permits up to five times the zoom per second for normal and precision input. Rapid bursts use the separate free-spin cap. 50 to 2000.
-- wheelFreeSpinMaxRate: 700
+- wheelFreeSpinMaxRate: 1000
   $name: Maximum free-spinning wheel zoom growth per second (%)
-  $description: 700 permits up to eight times zoom per second during rapid wheel bursts, with 40 ms follow. Uses at least the normal rate. 0 disables burst adaptation; 1 to 2000 sets its explicit cap.
+  $description: 1000 permits up to eleven times zoom per second during rapid wheel bursts, with 40 ms follow. Uses at least the normal rate. 0 disables burst adaptation; 1 to 2000 sets its explicit cap.
 - keyboardHoldMultiplier: 2
   $name: Progressive keyboard hold speed
   $description: 1 keeps standard repeats. 2 to 4 controls continuous acceleration after holding Win plus/minus for 200 ms, including numpad. Release stops at the visible level; a tap stays native.
@@ -270,10 +270,10 @@ struct Config {
     bool wheelWindowSwitch = true;
     bool windowButtons = false;
     bool disableReading = true;
-    int wheelStep = 35;
+    int wheelStep = 50;
     int wheelDuration = 100;
     int wheelMaxRate = 400;
-    int wheelFreeSpinMaxRate = 700;
+    int wheelFreeSpinMaxRate = 1000;
     bool instantHorizontalSwitch = true;
     bool normalZoomInOverview = true;
     int keyboardStep = 0;
@@ -3769,6 +3769,10 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
             // Only an objective validated before restoration can override the
             // temporary overview. Our restoration itself may advance epochs.
             cancelKeyboardHold();
+            if (source == bridge::InputSource::Reset) {
+                InterlockedExchange(&state->wheelActive, 0);
+                InterlockedExchange64(&state->wheelPacket, 0);
+            }
             if (source == bridge::InputSource::Reset && overviewSuspended.load()) {
                 InterlockedExchange(&state->overviewBypassed, 1);
                 overviewSuspended.store(false);
@@ -3809,6 +3813,7 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
                     InterlockedExchange(&state->startAtNormal, 0);
                     if (reset) uiPrimeBlocked.store(false);
                     originalOption(keeper, 14, percent, false);
+                    const unsigned generationBeforeUi = rendererGeneration.load();
                     setLevel(nativeUi, percent);
                     delivered = percent / 100.0;
                     if (prime && (!nativeSelf || rendererThread.load() != GetCurrentThreadId())) {
@@ -3820,6 +3825,16 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
                         return 0; // Keep sequence unacknowledged; no NULL call or automatic retry loop.
                     }
                     trackingInitialized.store(prime && nativeSelf);
+                    if (reset && nativeSelf && rendererGeneration.load() == generationBeforeUi) {
+                        // The UI may only queue this reset. Deliver its actual
+                        // fullscreen target before ACK/lease, otherwise the
+                        // queued change(1) would be rejected as an old echo.
+                        if (stopping.load() || !messageWindow || rendererThread.load() != GetCurrentThreadId()) {
+                            InterlockedExchange(&state->nativeError, ERROR_INVALID_THREAD_ID);
+                            return 0;
+                        }
+                        originalChange(nativeSelf, 1.0f, nullptr);
+                    }
                     if (prime && !action && source != bridge::InputSource::Reset && std::abs(delivered - level) >= 0.000001) {
                         originalChange(nativeSelf, static_cast<float>(level), nullptr);
                         originalOption(keeper, 14, static_cast<long>(std::lround(level * 100)), false);

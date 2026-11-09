@@ -21,6 +21,7 @@ bool nativeReadRegistry(const void* self) { ++nativeReadRegistryCalls; readingOb
 bool nativeReadDefault(const void* self) { ++nativeReadDefaultCalls; readingObject = self; return true; }
 int uiCalls = 0, directWrites = 0, persistedWrites = 0, cursorWarps = 0;
 bool simulateReentrantClose = false;
+bool deferUiRenderer = false;
 LRESULT closeResult = 0;
 double lastFloat = 1;
 pinch::View visibleView{};
@@ -48,11 +49,14 @@ void cache(void*, int name, long value, bool save) {
 }
 void apply(void* self, long value) {
     ++uiCalls;
-    visibleView.zoom = value / 100.0;
+    if (!deferUiRenderer) {
+        visibleView.zoom = value / 100.0;
+        if (!captureRendererFromUi) magnifier::rendererGeneration.fetch_add(1);
+    }
     if (simulateReentrantClose) closeResult = magnifier::messages(nullptr, WM_CLOSE, 0, 0);
     // Native UI requests persistence; the mod must suppress that for a pinch.
     magnifier::option(self, 14, value, true);
-    if (captureRendererFromUi) magnifier::change(reinterpret_cast<void*>(0x2000), value / 100.0f, nullptr);
+    if (captureRendererFromUi && !deferUiRenderer) magnifier::change(reinterpret_cast<void*>(0x2000), value / 100.0f, nullptr);
 }
 void direct(void* self, float value, POINT*) { ++directWrites; if (!self) ++nullRendererWrites; lastFloat = value; visibleView.zoom = value; if (value <= 1) { visibleView.x = 0; visibleView.y = 0; } }
 void command(void* self, int) { magnifier::moveMouse(self, POINT{10, 20}); magnifier::option(self, 14, percent + 100, true); }
@@ -397,9 +401,31 @@ int wmain() {
         magnifier::setLevel = apply; magnifier::originalChange = direct;
         currentMode = 2; percent = 100; visibleView = {1, 0, 0};
         captureRendererFromUi = false; simulateReentrantClose = false;
+        deferUiRenderer = false;
         uiCalls = directWrites = persistedWrites = nullRendererWrites = 0;
         lastFloat = 1;
     };
+    prepareCold();
+    state.nativeCaps = compatibility::NativeCore | compatibility::NativeKeyboardObserver;
+    magnifier::nativeSelf.store(reinterpret_cast<void*>(0x2000));
+    magnifier::rendererThread.store(GetCurrentThreadId());
+    magnifier::trackingInitialized.store(true);
+    state.nativeLevel = 20000; percent = 200; visibleView = {2, 37, 49};
+    state.wheelActive = 1; state.requestedLevel = 30000; state.requestedSequence = 699;
+    state.pendingCommand = 3; deferUiRenderer = true;
+    const int warpsBeforeDeferredReset = cursorWarps;
+    magnifier::messages(nullptr, magnifier::updateMessage, 0, 0);
+    require(uiCalls == 1 && directWrites == 1 && visibleView.zoom == 1 && state.nativeLevel == 10000,
+            "a reset synchronizes a deferred native UI renderer before acknowledging its queued wheel objective");
+    require(!state.wheelActive && state.appliedSequence == 699 && !magnifier::trackingInitialized,
+            "a deferred reset retires queued wheel ownership and its native tracking state");
+    magnifier::change(reinterpret_cast<void*>(0x2000), 2.5f, nullptr);
+    require(visibleView.zoom == 1 && directWrites == 1 && cursorWarps == warpsBeforeDeferredReset,
+            "a deferred reset's previous wheel animation cannot magnify again or warp the pointer");
+    deliver(12510, 700, bridge::InputSource::Wheel);
+    require(state.nativeLevel == 12510 && std::abs(visibleView.zoom - 1.251) < 0.00001 && state.appliedSequence == 700,
+            "fresh wheel input can start zooming normally after a deferred-renderer reset");
+
     prepareCold();
     state.nativeCaps = compatibility::NativeCore | compatibility::NativeKeyboardObserver;
     captureRendererFromUi = true; magnifier::ensureUi(reinterpret_cast<void*>(0x1000));
