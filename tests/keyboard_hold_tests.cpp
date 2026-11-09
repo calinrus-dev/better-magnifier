@@ -72,6 +72,7 @@ void tick(std::uint64_t time) {
     magnifier::messages(reinterpret_cast<HWND>(0x3000), WM_TIMER, magnifier::kKeyboardHoldTimer, 0);
 }
 void clear() {
+    magnifier::releaseManagedTarget();
     magnifier::keyboardHold = {};
     magnifier::keyboardHoldRevision = 0; magnifier::keyboardHoldGeneration = 0;
     magnifier::keyboardHeldVk = 0;
@@ -122,6 +123,32 @@ int wmain() {
     require(calls == 1 && observedStep == 100 && writes == 0 && !magnifier::keyboardHold.continuous(), "first tap remains native throughout the hold threshold");
     keys[VK_OEM_PLUS] = false; tick(1199);
     require(!magnifier::keyboardHold.active() && writes == 0 && moves == 0, "short tap never freezes its normal native animation");
+    clear(); plus(); send(0, 1000);
+    const LONG firstTapEpoch = state.inputRevision;
+    const LONG firstTapZoomEpoch = state.zoomRevision;
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.5f, nullptr);
+    require(writes == 1 && rendered.zoom == 1.5 && state.nativeLevel == 30000 &&
+            state.inputRevision == firstTapEpoch && state.zoomRevision == firstTapZoomEpoch && magnifier::keyboardHold.active(),
+            "the first native tap keeps animating without its delayed frames cancelling the pending hold");
+    tick(1199);
+    require(!magnifier::keyboardHold.continuous() && writes == 1,
+            "native animation does not bypass the two hundred millisecond hold threshold");
+    tick(1200);
+    require(magnifier::keyboardHold.continuous() && state.nativeLevel == 15000,
+            "hold takeover acquires the visible native factor after the first animation");
+    const LONG continuousEpoch = state.inputRevision;
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.8f, nullptr);
+    require(writes == 1 && rendered.zoom == 1.5 && state.inputRevision == continuousEpoch,
+            "an old native frame cannot retarget the engine after continuous keyboard takeover");
+    tick(1216);
+    require(writes == 2 && state.nativeLevel > 15000 && state.nativeLevel < 15150 && state.inputRevision == continuousEpoch,
+            "the first continuous frame advances smoothly without false renderer rebasing");
+    keys[VK_OEM_PLUS] = false; tick(1220);
+    const LONG frozenTarget = state.nativeLevel;
+    const int frozenWrites = writes;
+    magnifier::change(reinterpret_cast<void*>(0x2000), 3.0f, nullptr);
+    require(state.nativeLevel == frozenTarget && writes == frozenWrites && state.keyboardHoldFreezes == 1,
+            "release freezes once and its post-release lease rejects the former native goal");
     clear(); startContinuous();
     require(calls == 1 && writes == 0 && magnifier::keyboardHold.continuous() && reads == 1,
             "two hundred milliseconds takes ownership from one visible snapshot without another native step");
@@ -184,6 +211,9 @@ int wmain() {
     require(calls == 2 && writes == 0 && observedStep == 100, "speed one opts out completely");
     clear(); state.nativeCaps &= ~compatibility::NativeBootstrapWindows; plus(); send(0, 1000); send(0, 1250);
     require(calls == 2 && writes == 0, "missing capabilities preserve native keyboard commands");
+    clear(); state.nativeCaps &= ~compatibility::NativeKeyboardObserver; plus(); send(0, 1000); send(0, 1250); tick(1500);
+    require(calls == 2 && writes == 0 && !magnifier::keyboardHold.active() && !magnifier::managedTarget,
+            "an absent native command observer leaves held Win-plus entirely native without an echo filter");
     clear(); timerWorks = false; plus(); send(0, 1000); send(0, 1250);
     require(calls == 2 && writes == 0 && !magnifier::keyboardHold.active(), "timer installation failure preserves native commands");
     clear(); plus(); magnifier::nativeSelf.store(nullptr); magnifier::rendererThread.store(0); createRenderer = true;

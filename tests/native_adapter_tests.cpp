@@ -31,6 +31,10 @@ BOOL WINAPI clipBackend(const RECT* rectangle) { if (rectangle) ++clipLimits; el
 BOOL WINAPI readView(float* level, int* x, int* y) { *level = static_cast<float>(visibleView.zoom); *x = visibleView.x; *y = visibleView.y; return TRUE; }
 void moveView(void*, const RECT* rectangle, bool animated) { restoredTarget = animated; ++cameraMoves; visibleView.x = rectangle->left; visibleView.y = rectangle->top; }
 void rendererCommand(void* self, int) { magnifier::change(self, 3.7f, nullptr); magnifier::option(self, 14, 100, false); }
+void targetCommand(void*, int command) {
+    percent = std::clamp<long>(percent + (command == 0x800a ? 100 : -100), 100, 1600);
+    magnifier::change(reinterpret_cast<void*>(0x2000), percent / 100.0f, nullptr);
+}
 int originalWheelCalls = 0;
 void nativeWheel(void*, int) { ++originalWheelCalls; }
 LRESULT CALLBACK windowBackend(HWND, UINT, WPARAM, LPARAM) { return 321; }
@@ -309,8 +313,10 @@ int wmain() {
     require(state.inputRevision != beforeWheelKey && !state.wheelActive && cursorWarps == warpsBeforeWheel + 1,
             "native keyboard cancels pending wheel epoch and retains native pointer behavior");
     const LONG beforeExternal = state.inputRevision;
+    const LONG beforeNativeTarget = state.nativeLevel;
     magnifier::change(reinterpret_cast<void*>(0x2000), 4.2f, nullptr);
-    require(state.inputRevision != beforeExternal, "external renderer changes invalidate old wheel input");
+    require(state.inputRevision == beforeExternal && state.nativeLevel == beforeNativeTarget,
+            "an observed native command's asynchronous renderer frame is not another input or target");
     magnifier::originalUiWindowProc = windowBackend;
     magnifier::originalFullWindowProc = windowBackend;
     magnifier::windowData = existingObject;
@@ -378,6 +384,7 @@ int wmain() {
             "static desktop state does not suspend or reset its global zoom");
 
     const auto prepareCold = [&] {
+        magnifier::releaseManagedTarget();
         state = {};
         state.controlEnabled = 1; state.maxZoomPercent = 1600; state.nativeLevel = 10000;
         magnifier::nativeUi.store(reinterpret_cast<void*>(0x1000));
@@ -393,6 +400,71 @@ int wmain() {
         uiCalls = directWrites = persistedWrites = nullRendererWrites = 0;
         lastFloat = 1;
     };
+    prepareCold();
+    state.nativeCaps = compatibility::NativeCore | compatibility::NativeKeyboardObserver;
+    captureRendererFromUi = true; magnifier::ensureUi(reinterpret_cast<void*>(0x1000));
+    deliver(10050, 701, bridge::InputSource::Wheel);
+    state.wheelActive = 1;
+    const LONG wheelEpoch = state.inputRevision, wheelZoomEpoch = state.zoomRevision;
+    const int writesBeforeEcho = directWrites;
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.0001f, nullptr);
+    require(directWrites == writesBeforeEcho && state.nativeLevel == 10050 &&
+            state.inputRevision == wheelEpoch && state.zoomRevision == wheelZoomEpoch && state.wheelActive,
+            "a delayed cold animation cannot reverse or cancel its acknowledged wheel target");
+    deliver(10786, 702, bridge::InputSource::Wheel);
+    state.wheelActive = 0;
+    const int writesAfterWheel = directWrites;
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.005f, nullptr);
+    require(directWrites == writesAfterWheel && state.nativeLevel == 10786 && state.appliedSequence == 702,
+            "ending wheel input does not let its late native animation overwrite the last target");
+    deliver(10500, 703, bridge::InputSource::Wheel);
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.0786f, nullptr);
+    require(state.nativeLevel == 10500 && std::abs(visibleView.zoom - 1.05) < 0.00001,
+            "reversing wheel direction replaces its lease without replaying the earlier forward animation");
+    magnifier::originalZoomCommand = targetCommand;
+    const LONG beforeNativeCommand = state.inputRevision;
+    magnifier::zoomCommand(reinterpret_cast<void*>(0x1000), 0x800b);
+    require(state.nativeLevel == 10000 && state.inputRevision == beforeNativeCommand + 1 &&
+            !state.wheelActive && !magnifier::isManagedTargetEcho(reinterpret_cast<void*>(0x2000)),
+            "an explicit native minus releases managed ownership and creates exactly one input epoch");
+    const int beforeNativeAnimation = directWrites;
+    const LONG nativeAnimationEpoch = state.inputRevision;
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.02f, nullptr);
+    require(directWrites == beforeNativeAnimation + 1 && state.inputRevision == nativeAnimationEpoch && state.nativeLevel == 10000,
+            "native animation remains forwarded without pretending its visible frame is another command");
+    deliver(10000, 704, bridge::InputSource::Reset);
+    const int resetWrites = directWrites;
+    magnifier::change(reinterpret_cast<void*>(0x2000), 10.0f, nullptr);
+    require(state.nativeLevel == 10000 && directWrites == resetWrites && state.currentSource == static_cast<LONG>(bridge::InputSource::Reset),
+            "a reset at one hundred percent also rejects an older high-zoom callback");
+    state.controlEnabled = 0;
+    magnifier::change(reinterpret_cast<void*>(0x2000), 10.0f, nullptr);
+    require(state.nativeLevel == 10000 && directWrites == resetWrites,
+            "an explicit reset stays protected even when managed input is paused");
+    state.controlEnabled = 1;
+    InterlockedIncrement(&state.inputRevision);
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.03f, nullptr);
+    require(directWrites == resetWrites + 1 && !magnifier::isManagedTargetEcho(reinterpret_cast<void*>(0x2000)),
+            "a new source input epoch retires the previous lease instead of blocking native input forever");
+    deliver(12000, 705, bridge::InputSource::Pinch);
+    magnifier::change(reinterpret_cast<void*>(0x3000), 1.1f, nullptr);
+    require(magnifier::nativeSelf == reinterpret_cast<void*>(0x3000) &&
+            !magnifier::isManagedTargetEcho(reinterpret_cast<void*>(0x3000)),
+            "a replacement renderer is adopted rather than suppressed by another object's lease");
+    deliver(12500, 707, bridge::InputSource::Pinch);
+    magnifier::option(reinterpret_cast<void*>(0x1000), 4, 3, false);
+    require(!magnifier::managedTarget && !magnifier::nativeSelf,
+            "a view mode change explicitly retires managed target ownership");
+    magnifier::originalZoomCommand = command;
+    prepareCold(); state.nativeCaps = compatibility::NativeCore;
+    captureRendererFromUi = true; magnifier::ensureUi(reinterpret_cast<void*>(0x1000));
+    deliver(12000, 706, bridge::InputSource::Wheel);
+    const LONG fallbackEpoch = state.inputRevision;
+    const int fallbackWrites = directWrites;
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.1f, nullptr);
+    require(directWrites == fallbackWrites + 1 && state.inputRevision != fallbackEpoch && state.nativeLevel == 11000,
+            "without the native command observer managed suppression degrades to the original renderer fallback");
+
     prepareCold(); magnifier::ensureUi(reinterpret_cast<void*>(0x1000));
     require(state.magnifierReady && !magnifier::nativeSelf,
             "cold fullscreen UI accepts native control before any renderer callback");
@@ -570,5 +642,107 @@ int wmain() {
             "native Lens wheel zoom is preserved instead of becoming a window-switch action");
     magnifier::uiThread.store(GetCurrentThreadId()); magnifier::rendererThread.store(GetCurrentThreadId());
     magnifier::messageWindow.store(nullptr);
+    {
+        // Two injected Magnify.exe processes share the same protocol, but only
+        // the one selected by native Windows to own the UI may publish into it.
+        bridge::Record shared{};
+        shared.magnifierPid = 31316; shared.magnifierReady = 1;
+        shared.nativeCaps = 127; shared.nativeLevel = 27500;
+        shared.controlEnabled = 1; shared.wheelEnabled = 1; shared.enabled = 1;
+        shared.hideUi = 1; shared.keyboardStep = 20; shared.keyboardHoldMultiplier = 2;
+        shared.maxZoomPercent = 1600; shared.startAtNormal = 1;
+        shared.requestedSequence = 123; shared.appliedSequence = 120; shared.pendingCommand = 3;
+        shared.requestedLevel = 32000; shared.currentSource = static_cast<LONG>(bridge::InputSource::Wheel);
+        shared.inputRevision = 11; shared.zoomRevision = 22; shared.nativeCommands = 55; shared.wheelEvents = 99;
+        std::array<BYTE, sizeof(shared)> unchanged{};
+        std::memcpy(unchanged.data(), &shared, sizeof(shared));
+        magnifier::NativeMapping relay;
+        relay.useStagedTestRecord(&shared);
+        relay.get()->magnifierReady = 0; relay.get()->nativeCaps = 0;
+        relay.get()->nativeLevel = 10000; relay.get()->nativeError = ERROR_NOT_SUPPORTED;
+        relay.get()->appliedSequence = 999; relay.get()->inputRevision = 999;
+        require(!relay.get()->controlEnabled && !relay.get()->wheelEnabled && !relay.get()->enabled && relay.get()->startAtNormal == 1,
+                "staging keeps startup preferences but disables every managed input before UI ownership");
+        require(!relay.claimStagedTestRecord(4628, false, true) && !relay.claimStagedTestRecord(4628, true, false),
+                "an injected relay cannot claim without both authentic UI proof and an exclusive process lease");
+        relay.retire(true);
+        require(std::memcmp(unchanged.data(), &shared, sizeof(shared)) == 0,
+                "relay initialization, failed claim and teardown cannot change any byte of the real owner's protocol");
+
+        magnifier::NativeMapping firstCandidate, actualUi;
+        firstCandidate.useStagedTestRecord(&shared); actualUi.useStagedTestRecord(&shared);
+        firstCandidate.get()->nativeCaps = 0; firstCandidate.get()->resolverReasonNative = ERROR_NOT_SUPPORTED;
+        actualUi.get()->nativeCaps = 127; actualUi.get()->resolverModeNative = 1; actualUi.get()->nativeLevel = 12500;
+        actualUi.get()->startAtNormal = 0; // Already honored by this UI's initial native renderer callback.
+        require(actualUi.claimStagedTestRecord(7777, true, true),
+                "the actual UI can win a cold concurrent startup even when another process initialized first");
+        actualUi.get()->magnifierReady = 1;
+        firstCandidate.retire(true);
+        require(shared.magnifierPid == 7777 && shared.magnifierReady && shared.nativeCaps == 127 && shared.nativeLevel == 12500,
+                "the first initialized process dying as a relay cannot invalidate the actual UI owner");
+        require(shared.requestedSequence == 123 && shared.appliedSequence == 120 && shared.pendingCommand == 3 &&
+                shared.controlEnabled && shared.wheelEnabled && shared.keyboardStep == 20 && shared.nativeCommands == 55 && shared.wheelEvents == 99,
+                "claim copies only native metadata and preserves host settings, pending objectives and accumulated statistics");
+        require(shared.inputRevision == 12 && shared.zoomRevision == 23 && !shared.startAtNormal,
+                "only the real claim advances lifecycle epochs once and consumes its own staged startup normalization");
+        shared.magnifierPid = 4628;
+        actualUi.reaffirmPid();
+        require(shared.magnifierPid == 7777 && shared.magnifierReady,
+                "the authenticated UI publisher repairs a stale relay PID without changing its visible view");
+        actualUi.retire(true);
+        magnifier::NativeMapping newerUi;
+        newerUi.useStagedTestRecord(&shared); newerUi.get()->nativeCaps = 127;
+        newerUi.claimStagedTestRecord(8888, true, true); newerUi.get()->magnifierReady = 1;
+        actualUi.get()->nativeCaps = 0; actualUi.get()->magnifierReady = 0; actualUi.retire(true);
+        require(shared.magnifierPid == 8888 && shared.magnifierReady && shared.nativeCaps == 127,
+                "a retired publisher's late callback and repeated teardown cannot clear a newer UI owner");
+        newerUi.retire(true);
+
+        magnifier::NativeMapping unsupportedUi, unsupportedRelay;
+        unsupportedUi.useStagedTestRecord(&shared); unsupportedRelay.useStagedTestRecord(&shared);
+        unsupportedUi.get()->nativeCaps = 0; unsupportedUi.get()->resolverReasonNative = ERROR_NOT_SUPPORTED;
+        unsupportedUi.get()->nativeError = ERROR_NOT_SUPPORTED;
+        require(unsupportedUi.claimStagedTestRecord(9999, true, true) && shared.magnifierPid == 9999 && !shared.magnifierReady &&
+                !shared.nativeCaps && shared.nativeError == ERROR_NOT_SUPPORTED,
+                "an unsupported image publishes its native fallback only after authentic UI ownership");
+        std::memcpy(unchanged.data(), &shared, sizeof(shared));
+        unsupportedRelay.get()->nativeError = ERROR_NOT_SUPPORTED; unsupportedRelay.retire(true);
+        require(std::memcmp(unchanged.data(), &shared, sizeof(shared)) == 0,
+                "an unsupported relay cannot overwrite even the fallback owner's state");
+        unsupportedUi.retire(true);
+    }
+    {
+        bridge::Record shared{};
+        shared.magnifierPid = 31316; shared.magnifierReady = 1; shared.nativeCaps = 127;
+        shared.nativeLevel = 27500; shared.appliedSequence = 12; shared.requestedSequence = 14;
+        std::array<BYTE, sizeof(shared)> unchanged{};
+        std::memcpy(unchanged.data(), &shared, sizeof(shared));
+        magnifier::mapping.useStagedTestRecord(&shared);
+        magnifier::stopping.store(false); magnifier::afterInitComplete.store(false); magnifier::ownerWorkerStarted.store(false);
+        magnifier::ownerWorkerStartCount = 0; magnifier::available = true;
+        magnifier::afterInit();
+        require(!magnifier::ownerWorkerStartCount && std::memcmp(unchanged.data(), &shared, sizeof(shared)) == 0,
+                "relay afterInit neither publishes a PID nor starts a worker which could consume the owner's wake event");
+        magnifier::stop();
+        require(std::memcmp(unchanged.data(), &shared, sizeof(shared)) == 0,
+                "the production relay stop path leaves PID, readiness, zoom, acknowledgments and epochs unchanged");
+        magnifier::stopping.store(false); magnifier::afterInitComplete.store(false); magnifier::ownerWorkerStarted.store(false);
+        magnifier::mapping.useStagedTestRecord(&shared);
+        magnifier::mapping.get()->nativeCaps = 127;
+        magnifier::mapping.claimStagedTestRecord(GetCurrentProcessId(), true, true);
+        magnifier::nativeSelf.store(reinterpret_cast<void*>(0x2000));
+        const LONG sequenceBeforeAfterInit = shared.appliedSequence;
+        const LONG epochBeforeAfterInit = shared.inputRevision;
+        magnifier::activateNativeOwner();
+        require(magnifier::ownerWorkerStartCount == 0, "UI claim before afterInit cannot start a worker prematurely");
+        magnifier::afterInit(); magnifier::afterInit();
+        require(magnifier::ownerWorkerStartCount == 1 && shared.appliedSequence == sequenceBeforeAfterInit &&
+                shared.inputRevision == epochBeforeAfterInit && magnifier::nativeSelf == reinterpret_cast<void*>(0x2000),
+                "afterInit starts the claimed UI worker once without resetting its captured renderer or pending protocol");
+        magnifier::mapping.retire(true);
+        magnifier::mapping.useTestRecord(&state);
+        magnifier::stopping.store(false); magnifier::afterInitComplete.store(false); magnifier::ownerWorkerStarted.store(false);
+        magnifier::available = false;
+    }
     std::cout << checks << " native adapter checks passed; fake backend; desktop unchanged\n";
 }

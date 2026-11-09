@@ -2,6 +2,20 @@
 
 Fecha de revisión: 9 de noviembre de 2026.
 
+## Estado de 0.7.1
+
+- Regresión de 0.7.0 observada en el equipo: el PID compartido correspondía a una instancia de Magnify terminada con código 0, mientras otra instancia seguía viva con `MagUIClass`, el fullscreen y el endpoint propio del mod. Los atajos nativos seguían actualizando contadores, pero el host consideraba desconectado el backend. Reasignar únicamente el PID al dueño validado devolvió READY sin simular teclas ni cambiar el zoom. Esta recuperación temporal no se presenta como arreglo permanente.
+- El usuario confirmó que Inicio aparecía al soltar Win después de usar la rueda. El hook ahora conserva la marca de ratón consumido y enmascara la liberación antes de `CallNextHookEx`, incluida la repetición de Win y pares L/R. Las pruebas usan endpoints falsos; `keybd_event` no devuelve confirmación de éxito, así que el contador de liberación registra intentos.
+- Primera rueda: se identificó un frame adicional propio del host, no un umbral de 120 unidades. La trayectoria inicial usa la captura real con máximo 16 ms de adelanto y omite el RPC del 100 % sin cambio. No se atribuye sin medir toda la latencia a Windows ni se simula Win+«+».
+- 701 comprobaciones correctas: 86 núcleo, 64 helpers de ratón, 118 runtime/ABI, 59 callbacks del broker, 136 del adaptador nativo, 25 shell, 14 lanzamiento y 199 teclado progresivo. DLL, host e integración compilados con `-Wall -Wextra -Werror`. La integración visible no se ejecutó.
+- NativeMapping mantiene un registro privado antes de la UI. Las pruebas adversariales cubren candidatos concurrentes, relay que sale, lease rechazada, publicación de fallback, callbacks tardíos, metadatos permitidos, conservación de configuración/solicitudes y arranque único del worker después de autenticar la UI.
+- Instalada localmente con comparación SHA-256 de fuente/DLL y versión habilitada. Los componentes indicaron READY, nativeCaps=0x7f, gateCaps=0x7 y lastError=0. La captura pasiva posterior registró parejas de máscara inicial y de liberación sin fallos de SendInput; el contador de liberación sigue siendo sólo un intento, no prueba de que Inicio permaneciera cerrado.
+- Una captura pasiva anterior mostró retrocesos reales (102,61 → 100,50 %) sin comandos nativos nuevos. Se aislaron setters asíncronos atrasados: ahora no llegan al renderer mientras sigue vigente el objetivo gestionado. Las pruebas cubren ecos tardíos y prioridad de comandos explícitos, sin bloquear el seguimiento del ratón.
+- Tras esta corrección, el usuario confirmó rueda y teclado mantenido fluidos. Una captura pasiva posterior de 39,98 s registró tres pulsaciones mantenidas, incluidas teclas numéricas: − durante 1875 ms (449,46 → 102,31 %), + durante 1546 ms (102,11 → 516,13 %) y − durante 1875 ms (516,13 → 103,86 %). El contador de congelación avanzó en el mismo muestreo o en los siguientes 32 ms tras soltar; no es una medida exacta de latencia física. Esa captura no registró nuevos eventos de rueda. Los CSV privados no se distribuyen.
+- Nueva adaptación para giro libre: pruebas de subdivisión de deltas, volumen rápido, límite explícito 8×/s, final en 40 ms más un frame, inversión de una unidad, cancelación, discontinuidad del reloj y salida de los extremos. Un microbenchmark falso de 10.000 entradas al mailbox tardó 223 µs en este equipo; no mide consumo completo ni latencia de hardware.
+- El usuario confirmó con la revisión instalada que la rueda libre sigue mejor el giro y frena bien, después de probar giro rápido, frenado, inversión y movimiento pequeño.
+- Pendiente: confirmar físicamente el menú Inicio tras usar Win+rueda. No se ha probado un reinicio completo de Windows. Las comprobaciones de backend simulado no certifican otros modelos de ratón/touchpad ni futuras actualizaciones.
+
 ## Estado de 0.7.0
 
 - **629 comprobaciones automáticas correctas**: 77 núcleo, 59 helpers de ratón, 103 runtime/ABI, 49 callbacks reales del broker con APIs falsas, 110 adaptador nativo, 25 shell, 14 lanzamiento y 192 teclado progresivo. Compilación completa x64 con `-Wall -Wextra -Werror`; prueba Live compilada, sin ejecutar.

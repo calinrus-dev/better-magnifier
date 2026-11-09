@@ -559,5 +559,80 @@ int main() {
         require(after > 1 && after <= std::pow(5.0, 0.064) + 0.000001, "stall produced a teleport");
         w.cancel(); require(!w.tick(10016), "cancel retained stalled motion");
     });
+    test("adaptive free spin preserves one ordinary notch and high resolution subdivisions", [] {
+        pinch::WheelMotion a, b, c;
+        a.add(120, 1, 1000, 35, 100, 16, 400, 700);
+        for (int i=0;i<4;++i) b.add(30, 1, 1000, 35, 100, 16, 400, 700);
+        for (int i=0;i<120;++i) c.add(1, 1, 1000, 35, 100, 16, 400, 700);
+        near(a.goal(), 1.35); near(b.goal(), a.goal()); near(c.goal(), a.goal());
+    });
+    test("spaced ordinary notches retain their complete proportional gain", [] {
+        pinch::WheelMotion w; w.add(120, 1, 1000, 35, 100, 16, 400, 700);
+        for (unsigned time=1016;time<=1256;time+=16) w.tick(time);
+        near(w.goal(), 1.35); require(!w.active(), "ordinary first notch did not finish");
+        w.add(120, 1.35, 1300, 35, 100, 16, 400, 700);
+        near(w.goal(), 1.35*1.35);
+    });
+    test("free spin adaptation can be disabled without changing the legacy trajectory", [] {
+        pinch::WheelMotion legacy, disabled;
+        legacy.add(1200, 1, 1000, 35, 100, 16, 400);
+        disabled.add(1200, 1, 1000, 35, 100, 16, 400, 0);
+        near(disabled.goal(), legacy.goal());
+        for (unsigned time=1016;time<1300;time+=16) {
+            const auto a=legacy.tick(time), b=disabled.tick(time);
+            require(a.has_value()==b.has_value(), "opt-out changed completion time");
+            if (a) near(*a,*b);
+        }
+    });
+    test("large free spin batches keep forty milliseconds of bounded native travel", [] {
+        pinch::WheelMotion w; w.add(1200, 1, 1000, 35, 100, 16, 400, 700);
+        require(std::log(w.goal()) <= std::log(8.0)*0.04+0.000001, "free spin retained a long backlog");
+        double previous=1;
+        for (unsigned time=1016;time<=1064;time+=16) {
+            if (const auto next=w.tick(time)) {
+                require(std::log(*next/previous) <= std::log(8.0)*0.016+0.000001, "free spin exceeded its explicit rate cap");
+                previous=*next;
+            }
+        }
+        require(!w.active() && !w.tick(1100), "free spin extrapolated beyond the short follow window");
+    });
+    test("rapid raw volume activates adaptation while tiny event count alone does not", [] {
+        pinch::WheelMotion tiny, fast;
+        for(int i=0;i<120;++i) tiny.add(1, 1, 1000, 35, 100, 16, 400, 700);
+        near(tiny.goal(),1.35);
+        fast.add(120,1,1000,35,100,16,400,700);
+        fast.tick(1016); fast.add(120,1,1016,35,100,16,400,700);
+        const double current=*fast.tick(1032);
+        fast.add(120,current,1032,35,100,16,400,700);
+        require(std::log(fast.goal()/current) <= std::log(8.0)*0.04+0.000001,
+                "sustained physical wheel volume did not shorten its pending distance");
+    });
+    test("one reverse unit discards burst velocity and the old pending direction", [] {
+        pinch::WheelMotion w; w.add(1200,4,1000,35,100,16,400,700);
+        const double current=*w.tick(1016);
+        w.add(-1,current,1016,35,100,16,400,700);
+        near(w.goal(),current/std::pow(1.35,1.0/120));
+        require(*w.tick(1032)<current, "burst momentum survived a tiny reversal");
+    });
+    test("free spin bounds have no hidden windup", [] {
+        pinch::WheelMotion w; w.add(1200,16,1000,35,100,16,400,700);
+        require(!w.active(), "upper limit retained motion");
+        w.add(-1,16,1016,35,100,16,400,700); require(*w.tick(1032)<16, "cannot leave upper limit");
+        w.cancel(); w.add(-1200,1,1100,35,100,16,400,700);
+        require(!w.active(), "lower limit retained motion");
+        w.add(1,1,1116,35,100,16,400,700); require(*w.tick(1132)>1, "cannot leave lower limit");
+    });
+    test("a new precise gesture after a quiet gap loses the old burst classification", [] {
+        pinch::WheelMotion w; w.add(1200,1,1000,35,100,16,400,700);
+        for(unsigned time=1016;time<=1064;time+=16) w.tick(time);
+        const double current=w.goal();
+        w.add(1,current,1200,35,100,16,400,700);
+        near(w.goal(),current*std::pow(1.35,1.0/120));
+        w.cancel(); require(!w.tick(1300), "cancel retained a burst callback");
+    });
+    test("explicit burst cap never reduces a higher configured base cap", [] {
+        pinch::WheelMotion w; w.add(1200,1,1000,35,100,16,1500,700);
+        near(w.goal(),std::pow(16.0,0.04));
+    });
     std::cout << passed << " tests passed\n";
 }

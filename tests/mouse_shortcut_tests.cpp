@@ -51,6 +51,17 @@ int main() {
         require(!win.winDown() && !win.winOnly(), "session loss clears modifier bookkeeping without synthesizing key releases");
     }
     {
+        pinch::WinMenuMask win; win.key(0x5b, true); win.consume(); win.consumedMouse();
+        require(win.maskRelease(0x5b) && !win.maskRelease(0x5c), "release masking belongs only to a physically held consumed Win key");
+        win.key(0x53, true); win.key(0x53, false);
+        require(!win.maskRelease(0x5b), "native keyboard chord cancels menu mask debt");
+        win.key(0x5b, true);
+        require(win.maskRelease(0x5b), "Win autorepeat re-arms release masking after prior keyboard use");
+        win.key(0x5b, false); require(!win.maskRelease(0x5b), "physical release closes mask debt");
+        win.key(0x5b, true); win.key(0xa2, false); win.consume(); win.consumedMouse();
+        require(win.maskRelease(0x5b), "an unmatched modifier up cannot falsely claim Windows observed a keyboard chord");
+    }
+    {
         pinch::WindowWheel wheel;
         require(!wheel.feed(30, 0) && !wheel.feed(30, 1) && !wheel.feed(30, 2), "fractional packets accumulate");
         require(wheel.feed(30, 3) == -1, "one notch selects previous");

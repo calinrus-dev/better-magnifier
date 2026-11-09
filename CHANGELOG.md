@@ -1,5 +1,14 @@
 # Cambios
 
+## 0.7.1 — 2026-11-09 (experimental)
+
+- Corrección de la desconexión al abrir instancias temporales de Magnify: metadatos nativos aislados hasta autenticar la UI real, lease por proceso y limpieza condicionada al dueño. Los relays no sustituyen el PID del renderer ni vacían el estado compartido al terminar.
+- La máscara de Inicio se aplica también antes de reenviar Win-UP cuando esa pulsación se usó con el ratón. Resiste la repetición de Win y pares izquierdo/derecho. La tecla Win sola y los atajos de teclado siguen pasando sin sintetizar modificadores.
+- Una trayectoria de rueda nueva usa el tiempo real de captura, acotado a 16 ms, y evita el primer envío vacío del 100 %. Conserva deltas finos y las reglas de inversión; no inyecta Win+«+» para activar el motor.
+- Filtrado de ecos asíncronos del setter nativo durante un objetivo gestionado. Evita retrocesos de la imagen y cancelaciones de rueda/teclado mantenido; el primer toque y los comandos nativos explícitos conservan prioridad.
+- Seguimiento adaptativo para ruedas de giro libre: límite rápido independiente de 700 %/s, transición y recorrido pendiente de 40 ms, precisión normal intacta y cancelación del impulso al invertir. Ajustable y desactivable con `wheelFreeSpinMaxRate=0`.
+- Diagnóstico de máscaras de Inicio y resultados del cambio de ventanas, con protocolo v14 para separar datos de revisiones anteriores.
+
 ## 0.7.0 — 2026-11-09 (experimental)
 
 - Ganancia predeterminada de rueda al 35 %, conservando deltas fraccionarios y límite de velocidad.

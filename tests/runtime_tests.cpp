@@ -81,6 +81,7 @@ struct HostTestAccess {
     static void cancel(Host& host) { host.cancelWheel(); }
     static bool active(Host& host) { return host.wheel_.active(); }
     static double goal(Host& host) { return host.wheel_.goal(); }
+    static void freeSpin(Host& host, int rate) { host.config_.wheelFreeSpinMaxRate = rate; }
     static void resume(Host& host, ULONGLONG now) { host.activity_.resume(); host.applySessionState(); host.refreshSession(now, true); }
     static void refresh(Host& host, ULONGLONG now) { host.refreshSession(now); }
     static bool sessionActive(Host& host) { return host.sessionActive_; }
@@ -604,6 +605,103 @@ int wmain(int argc, wchar_t** argv) {
         require(windowRequests == 2 && requestedWindow == reinterpret_cast<HWND>(3) && runtime::HostTestAccess::windowPending(fixture.host, 3032) == 1, "host confirms first then dispatches second asynchronous step exactly once");
         foreground = requestedWindow; runtime::HostTestAccess::tick(fixture.host, 3048);
         require(!runtime::HostTestAccess::windowPending(fixture.host, 3048) && windowRequests == 2, "second foreground acknowledgement drains two-notch queue");
+    }
+    {
+        HostFixture fixture(210, {1, 0, 0}); auto& record = fixture.record; auto& host = fixture.host;
+        runtime::HostTestAccess::nativeBackend(host, record);
+        const unsigned writesBefore = transformWrites;
+        bridge::enqueueWheel(&record, 120, 210, 1000); runtime::HostTestAccess::tick(host, 1016);
+        require(record.requestedSequence == 1 && record.requestedLevel > 10000 && record.requestedLevel <= 10261 &&
+                record.requestSource == static_cast<LONG>(bridge::InputSource::Wheel) && transformWrites == writesBefore,
+                "the first wheel event waiting one frame sends positive native progress during that frame instead of an empty 100 percent objective");
+    }
+    {
+        HostFixture fixture(211, {1, 0, 0}); auto& record = fixture.record;
+        runtime::HostTestAccess::nativeBackend(fixture.host, record);
+        bridge::enqueueWheel(&record, 120, 211, 1000); runtime::HostTestAccess::tick(fixture.host, 1100);
+        require(record.requestedLevel > 10000 && record.requestedLevel <= 10261,
+                "initial wheel scheduling credits at most sixteen milliseconds instead of replaying a stale mailbox delay");
+    }
+    {
+        HostFixture fixture(212, {1, 0, 0}); auto& record = fixture.record;
+        runtime::HostTestAccess::nativeBackend(fixture.host, record);
+        bridge::enqueueWheel(&record, 120, 212, 1000); runtime::HostTestAccess::tick(fixture.host, 1000);
+        require(record.requestedSequence == 0 && runtime::HostTestAccess::active(fixture.host),
+                "an event captured in the current millisecond does not invent elapsed time or send an unchanged baseline");
+        runtime::HostTestAccess::tick(fixture.host, 1016);
+        require(record.requestedSequence == 1 && record.requestedLevel > 10000,
+                "a same-millisecond wheel event progresses on the next actual frame");
+    }
+    {
+        HostFixture fixture(213, {1, 0, 0}); auto& record = fixture.record;
+        runtime::HostTestAccess::nativeBackend(fixture.host, record);
+        bridge::enqueueWheel(&record, 120, 213, 1001); runtime::HostTestAccess::tick(fixture.host, 1000);
+        require(record.requestedSequence == 0 && runtime::HostTestAccess::active(fixture.host),
+                "a concurrent future capture is retained without manufacturing an early first target");
+        runtime::HostTestAccess::tick(fixture.host, 1016);
+        require(record.requestedSequence == 1 && record.requestedLevel > 10000,
+                "a retained concurrent capture advances at the next actual frame");
+    }
+    {
+        HostFixture fixture(214, {1, 0, 0}); auto& record = fixture.record;
+        runtime::HostTestAccess::nativeBackend(fixture.host, record);
+        bridge::enqueueWheel(&record, 1, 214, 1000); runtime::HostTestAccess::tick(fixture.host, 1016);
+        require(record.requestedLevel > 10000 && record.requestedLevel < 10100,
+                "first high-resolution delta keeps sub-percent native precision without a forced one percent kick");
+        for (unsigned time=1032; time<=1144; time+=16) runtime::HostTestAccess::tick(fixture.host, time);
+        const auto expected = std::llround(std::pow(1 + pinch::Config{}.wheelStep / 100.0, 1.0 / 120) * 10000);
+        require(record.requestedLevel == expected && !runtime::HostTestAccess::active(fixture.host),
+                "captured-time scheduling retains the exact fractional wheel goal and finite endpoint");
+    }
+    {
+        HostFixture fixture(215, {1, 0, 0}); auto& record = fixture.record;
+        runtime::HostTestAccess::nativeBackend(fixture.host, record);
+        bridge::enqueueWheel(&record, 120, 215, 1000); runtime::HostTestAccess::tick(fixture.host, 1016);
+        bridge::enqueueWheel(&record, 120, 215, 1020); runtime::HostTestAccess::tick(fixture.host, 1048);
+        const pinch::Config config{}; pinch::WheelMotion expected;
+        expected.add(120, 1, 1000, config.wheelStep, config.wheelDuration, 16, config.wheelMaxRate); expected.tick(1016);
+        expected.add(120, 1, 1048, config.wheelStep, config.wheelDuration, 16, config.wheelMaxRate);
+        require(record.requestedLevel == std::llround(*expected.tick(1048) * 10000),
+                "additional active wheel input keeps the processing clock and cannot rewind or count event residence twice");
+    }
+    {
+        HostFixture fixture(216, {1, 0, 0}); auto& record = fixture.record;
+        runtime::HostTestAccess::nativeBackend(fixture.host, record);
+        bridge::enqueueWheel(&record, 120, 216, 1000); runtime::HostTestAccess::tick(fixture.host, 1016);
+        const LONG forward = record.requestedLevel; record.nativeLevel = forward;
+        bridge::enqueueWheel(&record, -1, 216, 1020); runtime::HostTestAccess::tick(fixture.host, 1032);
+        require(record.requestedLevel <= forward, "captured scheduling cannot deliver forward momentum after reversing a wheel gesture");
+        runtime::HostTestAccess::tick(fixture.host, 1048);
+        require(record.requestedLevel < forward, "a tiny reverse wheel delta still responds on its first advancing frame");
+    }
+    {
+        HostFixture fixture(217, {1, 0, 0}); auto& record = fixture.record;
+        runtime::HostTestAccess::nativeBackend(fixture.host, record);
+        bridge::enqueueWheel(&record, 120, 217, 1000); runtime::HostTestAccess::tick(fixture.host, 1016);
+        InterlockedIncrement(&record.inputRevision); InterlockedIncrement(&record.zoomRevision); record.nativeLevel = 20000;
+        bridge::enqueueWheel(&record, 1, record.inputRevision, 1050); runtime::HostTestAccess::tick(fixture.host, 1066);
+        require(record.requestedLevel > 20000 && record.requestedLevel < 20200,
+                "a fresh wheel trajectory after a keyboard epoch adopts its new base and captures only the new event age");
+    }
+    {
+        HostFixture fixture(230,{1,0,0}); auto& record=fixture.record;
+        runtime::HostTestAccess::nativeBackend(fixture.host,record);
+        bridge::enqueueWheel(&record,1200,230,1000); runtime::HostTestAccess::tick(fixture.host,1016);
+        require(record.requestedLevel>10261 && record.requestedLevel<=10339 &&
+                record.requestSource==static_cast<LONG>(bridge::InputSource::Wheel),
+                "the host opts into the explicit fast cap while retaining a typed native wheel request");
+        runtime::HostTestAccess::tick(fixture.host,1032); runtime::HostTestAccess::tick(fixture.host,1048);
+        runtime::HostTestAccess::tick(fixture.host,1064);
+        require(!runtime::HostTestAccess::active(fixture.host) && !record.wheelActive,
+                "a free-spin batch ends without extrapolation within forty milliseconds plus one frame");
+    }
+    {
+        HostFixture fixture(231,{1,0,0}); auto& record=fixture.record;
+        runtime::HostTestAccess::nativeBackend(fixture.host,record);
+        runtime::HostTestAccess::freeSpin(fixture.host,0);
+        bridge::enqueueWheel(&record,1200,231,1000); runtime::HostTestAccess::tick(fixture.host,1016);
+        require(record.requestedLevel>10000 && record.requestedLevel<=10261,
+                "opting out of burst adaptation retains the configured normal rate cap");
     }
     if (argc != 2) {
         std::cerr << "Usage: runtime-tests path-to-mod.dll\n";

@@ -4,7 +4,7 @@
 // @name:es-ES      Better Magnifier
 // @description     KWin-inspired accessibility: smooth pinch and mouse-wheel zoom for native Windows Magnifier
 // @description:es-ES Accesibilidad inspirada en KWin: zoom fluido con pellizco y rueda para la Lupa nativa de Windows
-// @version         0.7.0
+// @version         0.7.1
 // @author          calinrus-dev
 // @github          https://github.com/calinrus-dev
 // @homepage        https://github.com/calinrus-dev/better-magnifier
@@ -94,8 +94,11 @@ https://github.com/calinrus-dev/better-magnifier
   $name: Wheel transition time (milliseconds)
   $description: 40 to 250 ms. More wheel movement increases the zoom distance.
 - wheelMaxRate: 400
-  $name: Maximum wheel zoom growth per second (%)
-  $description: 400 permits up to five times the zoom per second. Bounds free-spin speed without losing small wheel deltas. 50 to 2000.
+  $name: Maximum normal wheel zoom growth per second (%)
+  $description: 400 permits up to five times the zoom per second for normal and precision input. Rapid bursts use the separate free-spin cap. 50 to 2000.
+- wheelFreeSpinMaxRate: 700
+  $name: Maximum free-spinning wheel zoom growth per second (%)
+  $description: 700 permits up to eight times zoom per second during rapid wheel bursts, with 40 ms follow. Uses at least the normal rate. 0 disables burst adaptation; 1 to 2000 sets its explicit cap.
 - keyboardHoldMultiplier: 2
   $name: Progressive keyboard hold speed
   $description: 1 keeps standard repeats. 2 to 4 controls continuous acceleration after holding Win plus/minus for 200 ms, including numpad. Release stops at the visible level; a tap stays native.
@@ -270,6 +273,7 @@ struct Config {
     int wheelStep = 35;
     int wheelDuration = 100;
     int wheelMaxRate = 400;
+    int wheelFreeSpinMaxRate = 700;
     bool instantHorizontalSwitch = true;
     bool normalZoomInOverview = true;
     int keyboardStep = 0;
@@ -467,11 +471,13 @@ class WheelMotion {
     std::uint64_t started_ = 0, lastTick_ = 0;
     unsigned duration_ = 100;
     int direction_ = 0;
-    bool active_ = false;
+    bool active_ = false, fast_ = false, haveInput_ = false;
+    double recentUnits_ = 0;
+    std::uint64_t lastInput_ = 0;
 public:
     bool active() const { return active_; }
     double goal() const { return goal_; }
-    void cancel() { active_ = false; direction_ = 0; }
+    void cancel() { active_ = false; direction_ = 0; fast_ = false; haveInput_ = false; recentUnits_ = 0; }
     std::optional<double> tick(std::uint64_t now) {
         if (!active_) return std::nullopt;
         const auto elapsed = now >= lastTick_ ? std::min<std::uint64_t>(now - lastTick_, 64) : 0;
@@ -485,27 +491,41 @@ public:
         if (t >= 1 && std::abs(std::log(goal_ / value_)) <= 0.000000001) { value_ = goal_; active_ = false; }
         return value_;
     }
-    void add(int delta, double current, std::uint64_t now, int step, int duration, double maximum, int maximumRate = 0) {
+    void add(int delta, double current, std::uint64_t now, int step, int duration, double maximum,
+             int maximumRate = 0, int freeSpinMaximumRate = 0) {
         if (!delta || !std::isfinite(current) || current < 1) return;
+        if (haveInput_ && now < lastInput_) cancel(); // Discontinuous input clocks cannot revive burst velocity.
         if (active_) tick(now);
         else value_ = goal_ = current;
         const int direction = delta < 0 ? -1 : 1;
-        if (direction_ && direction != direction_) value_ = goal_ = current; // Drop both old goal and not-yet-delivered forward frames.
+        if (direction_ && direction != direction_) {
+            value_ = goal_ = current; // Drop both old goal and not-yet-delivered forward frames.
+            recentUnits_ = 0; haveInput_ = false; fast_ = false;
+        }
+        if (!haveInput_ || now - lastInput_ > 100) recentUnits_ = 0;
+        else recentUnits_ *= std::exp(-static_cast<double>(now - lastInput_) / 90.0);
+        recentUnits_ = std::min(1000000.0, recentUnits_ + std::abs(static_cast<double>(delta)));
+        lastInput_ = now; haveInput_ = true;
+        if (!active_) fast_ = false;
+        if (freeSpinMaximumRate > 0 && maximumRate > 0 && recentUnits_ > 240) fast_ = true;
+        if (freeSpinMaximumRate <= 0) fast_ = false;
         direction_ = direction;
         from_ = value_;
         const double cap = std::clamp(maximum, 1.0, 16.0);
         const double notch = std::log1p(std::clamp(step, 1, 100) / 100.0);
         const double distance = std::clamp(delta / 120.0 * notch, -32.0, 32.0);
-        rate_ = maximumRate <= 0 ? std::numeric_limits<double>::infinity() : std::log1p(std::clamp(maximumRate, 50, 2000) / 100.0);
+        const int effectiveRate = fast_ ? std::max(maximumRate, std::clamp(freeSpinMaximumRate, 1, 2000)) : maximumRate;
+        rate_ = effectiveRate <= 0 ? std::numeric_limits<double>::infinity() : std::log1p(std::clamp(effectiveRate, 50, 2000) / 100.0);
         double goal = std::log(goal_) + distance;
         if (std::isfinite(rate_)) {
-            // Keep at most 200 ms of motion ahead, while preserving a complete
-            // ordinary notch. Excess free-spin input is discarded, never replayed.
-            const double lead = std::max(notch, rate_ * 0.20);
+            // Ordinary input retains its established full-notch behavior.
+            // A measured burst keeps only 40 ms ahead: excess spin is discarded,
+            // never queued or extrapolated after physical events stop arriving.
+            const double lead = fast_ ? rate_ * 0.04 : std::max(notch, rate_ * 0.20);
             goal = std::clamp(goal, std::log(value_) - lead, std::log(value_) + lead);
         }
         goal_ = std::exp(std::clamp(goal, 0.0, std::log(cap)));
-        duration_ = static_cast<unsigned>(std::clamp(duration, 40, 250));
+        duration_ = fast_ ? 40u : static_cast<unsigned>(std::clamp(duration, 40, 250));
         started_ = lastTick_ = now;
         active_ = std::abs(goal_ - value_) > 0.000000001;
     }
@@ -631,7 +651,7 @@ public:
 class WinMenuMask {
     std::array<std::uint64_t, 4> down_{};
     bool keyboardUsed_ = false;
-    bool maskIssued_ = false;
+    bool maskIssued_ = false, mouseUsed_ = false;
     static constexpr unsigned leftWin = 0x5b, rightWin = 0x5c;
     bool held(unsigned key) const { return key < 256 && (down_[key / 64] & (std::uint64_t{1} << (key % 64))); }
     bool otherHeld() const {
@@ -650,19 +670,25 @@ public:
         if (down) down_[vk / 64] |= std::uint64_t{1} << (vk % 64);
         else down_[vk / 64] &= ~(std::uint64_t{1} << (vk % 64));
         if (isWin) {
-            if (!wasWin && winDown()) { keyboardUsed_ = otherHeld(); maskIssued_ = false; }
-            else if (!winDown()) { keyboardUsed_ = false; maskIssued_ = false; }
-        } else if (wasWin) keyboardUsed_ = true;
+            if (!wasWin && winDown()) { keyboardUsed_ = otherHeld(); maskIssued_ = false; mouseUsed_ = false; }
+            else if (down) keyboardUsed_ = otherHeld(); // Repeated Win DOWN can re-arm Start.
+            else if (!winDown()) { keyboardUsed_ = false; maskIssued_ = false; mouseUsed_ = false; }
+        } else if (wasWin && down) keyboardUsed_ = true;
     }
     bool winDown() const { return held(leftWin) || held(rightWin); }
     bool winOnly() const { return winDown() && !otherHeld(); }
     bool consume() {
-        if (!winOnly() || keyboardUsed_ || maskIssued_) return false;
+        if (!winOnly()) return false;
+        if (keyboardUsed_ || maskIssued_) return false;
         maskIssued_ = true;
         return true;
     }
-    void maskFailed() { maskIssued_ = false; }
-    void reset() { down_.fill(0); keyboardUsed_ = false; maskIssued_ = false; }
+    void consumedMouse() { if (winOnly()) mouseUsed_ = true; }
+    bool maskRelease(unsigned vk) const {
+        return (vk == leftWin || vk == rightWin) && held(vk) && mouseUsed_ && !keyboardUsed_;
+    }
+    void maskFailed() { maskIssued_ = false; mouseUsed_ = false; }
+    void reset() { down_.fill(0); keyboardUsed_ = false; maskIssued_ = false; mouseUsed_ = false; }
 };
 
 // Window switching is discrete even for free-spinning/high-resolution wheels.
@@ -889,8 +915,8 @@ bool resolve(HMODULE module, Kind kind, void** targets, std::size_t count) {
 namespace bridge {
 enum class InputSource : LONG { None = 0, Pinch = 1, Wheel = 2, Keyboard = 3, Reset = 4 };
 inline volatile LONG* desktopRaised = nullptr;
-constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v13";
-constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v13";
+constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v14";
+constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v14";
 struct alignas(8) Record {
     volatile LONG phase;
     volatile LONG down;
@@ -956,6 +982,13 @@ struct alignas(8) Record {
     volatile LONG64 windowWheelTime;
     volatile LONG mouseHooksReady;
     volatile LONG readingReady;
+    volatile LONG menuMaskInitialSent;
+    volatile LONG menuMaskInitialFailed;
+    volatile LONG menuMaskReleaseSent;
+    volatile LONG windowSwitchAttempts;
+    volatile LONG windowSwitchConfirmed;
+    volatile LONG windowSwitchRejected;
+    volatile LONG windowSwitchDeferredFailed;
 };
 // Only the native UI produces wheel input. The host consumes one bounded
 // packet per frame; no per-delta posted messages can starve WM_TIMER.
@@ -1616,11 +1649,13 @@ class MouseInputBroker {
     friend struct InputBrokerTestAccess;
     inline static decltype(&GetAsyncKeyState) apiReadKey = GetAsyncKeyState;
     inline static decltype(&SendInput) apiSendInput = SendInput;
+    inline static decltype(&keybd_event) apiKeyEvent = keybd_event;
     inline static decltype(&PostMessageW) apiPost = PostMessageW;
     inline static decltype(&CallNextHookEx) apiNext = CallNextHookEx;
 #else
     inline static const auto apiReadKey = GetAsyncKeyState;
     inline static const auto apiSendInput = SendInput;
+    inline static const auto apiKeyEvent = keybd_event;
     inline static const auto apiPost = PostMessageW;
     inline static const auto apiNext = CallNextHookEx;
 #endif
@@ -1659,7 +1694,8 @@ class MouseInputBroker {
         }
         input[1].ki.dwFlags = KEYEVENTF_KEYUP;
         const UINT sent = apiSendInput(2, input, sizeof(INPUT));
-        if (sent == 2) return true;
+        if (sent == 2) { InterlockedIncrement(&state_->menuMaskInitialSent); return true; }
+        InterlockedIncrement(&state_->menuMaskInitialFailed);
         if (sent == 1) apiSendInput(1, &input[1], sizeof(INPUT));
         menu_.maskFailed();
         return false; // UIPI can reject input: leave this event to Windows.
@@ -1668,8 +1704,17 @@ class MouseInputBroker {
         if (code == HC_ACTION && owner_) {
             const auto* event = reinterpret_cast<const KBDLLHOOKSTRUCT*>(data);
             if (!(event->flags & LLKHF_INJECTED)) owner_->consumeResync();
-            owner_->menu_.key(event->vkCode, message == WM_KEYDOWN || message == WM_SYSKEYDOWN,
-                             (event->flags & LLKHF_INJECTED) != 0);
+            const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+            // Disguise a consumed mouse chord at physical Win release as well:
+            // Win auto-repeat can invalidate the earlier mouse-side mask.
+            // keybd_event runs this neutral pair before CallNext exposes Win UP;
+            // SendInput from this callback can queue it after the release.
+            if (!(event->flags & LLKHF_INJECTED) && !down && owner_->menu_.maskRelease(event->vkCode)) {
+                apiKeyEvent(0xe8, 0, 0, kMaskTag);
+                apiKeyEvent(0xe8, 0, KEYEVENTF_KEYUP, kMaskTag);
+                InterlockedIncrement(&owner_->state_->menuMaskReleaseSent);
+            }
+            owner_->menu_.key(event->vkCode, down, (event->flags & LLKHF_INJECTED) != 0);
         }
         return apiNext(nullptr, code, message, data);
     }
@@ -1708,6 +1753,7 @@ class MouseInputBroker {
                 bridge::enqueueWheel(broker->state_, delta,
                     InterlockedCompareExchange(&broker->state_->inputRevision, 0, 0), GetTickCount64());
                 InterlockedIncrement(&broker->state_->wheelEvents);
+                if (flags & 2) broker->menu_.consumedMouse();
                 return 1;
             }
             if (delta && ctrlAlt && (flags & 2) && (flags & 4) && !otherMode) {
@@ -1717,6 +1763,7 @@ class MouseInputBroker {
         }
         if (zoomUsable && message == WM_MBUTTONDOWN && ((flags & 2) ? winZoom : ctrlAlt)) {
             if ((!(flags & 2) || broker->maskStart()) && apiPost(broker->target_, kMouseActionMessage, 1, 0)) {
+                if (flags & 2) broker->menu_.consumedMouse();
                 broker->buttons_.press(1, true); return 1;
             }
         }
@@ -1831,7 +1878,7 @@ class Host {
             } // A new generation already published by native keys keeps its own pending input.
         }
     }
-    void wheelInput(int delta, LONG revision, std::uint64_t now) {
+    void wheelInput(int delta, LONG revision, std::uint64_t now, std::optional<std::uint64_t> capturedAt = std::nullopt) {
         auto* state = bridge_.get();
         if (!delta || !state || paused_ || !sessionActive_ || !config_.enabled || config_.observeOnly ||
             !config_.keyboardInterop || !config_.smoothWheel ||
@@ -1851,8 +1898,12 @@ class Host {
         }
         if (wheel_.active() && wheelRevision_ != state->inputRevision) cancelWheel(false);
         wheelRevision_ = state->inputRevision;
-        wheel_.add(delta, zoom_.current(), now, config_.wheelStep, config_.wheelDuration,
-                   std::min(config_.maxZoom, 16.0), config_.wheelMaxRate);
+        // Account for actual mailbox residence on a new gesture, avoiding an
+        // extra empty frame at 100%. Active trajectories keep a monotonic clock.
+        const auto motionStart = !wheel_.active() && capturedAt
+            ? std::clamp(*capturedAt, now >= 16 ? now - 16 : 0, now) : now;
+        wheel_.add(delta, zoom_.current(), motionStart, config_.wheelStep, config_.wheelDuration,
+                   std::min(config_.maxZoom, 16.0), config_.wheelMaxRate, config_.wheelFreeSpinMaxRate);
         InterlockedExchange(&state->wheelActive, wheel_.active() ? 1 : 0);
     }
 
@@ -1899,8 +1950,13 @@ class Host {
             const auto packet = static_cast<std::uint64_t>(InterlockedExchange64(&state->wheelPacket, 0));
             const auto captured = static_cast<std::uint64_t>(InterlockedCompareExchange64(&state->wheelTime, 0, 0));
             if (pinch::wheelDelta(packet) && (captured >= now || now - captured <= 200))
-                wheelInput(pinch::wheelDelta(packet), static_cast<LONG>(pinch::wheelRevision(packet)), now);
-            if (const auto level = wheel_.tick(now)) zoom_.target(*level, true, bridge::InputSource::Wheel);
+                wheelInput(pinch::wheelDelta(packet), static_cast<LONG>(pinch::wheelRevision(packet)), now, captured);
+            if (const auto level = wheel_.tick(now)) {
+                // Do not send an unchanged quantized baseline to the native UI.
+                // Tiny high-resolution deltas still retain the 1/10000 contract.
+                if (std::llround(*level * 10000) != std::llround(zoom_.current() * 10000))
+                    zoom_.target(*level, true, bridge::InputSource::Wheel);
+            }
             InterlockedExchange(&state->wheelActive, wheel_.active() ? 1 : 0);
             if (coldWheelDelta_) {
                 if (now > coldWheelDeadline_ || paused_ || !sessionActive_ || coldWheelCommands_ != state->nativeCommands) coldWheelDelta_ = 0;
@@ -1919,18 +1975,30 @@ class Host {
             if (windowTicket_) {
                 const auto result = windowSwitcher_->status(windowTicket_, now);
                 if (result != WindowActivation::Pending) {
-                    if (result == WindowActivation::Confirmed && windowGeneration_ == windowWheel_.generation()) windowWheel_.pop();
-                    else if (result == WindowActivation::Failed) windowRetry_ = now + 32;
+                    if (result == WindowActivation::Confirmed) {
+                        InterlockedIncrement(&state->windowSwitchConfirmed);
+                        if (windowGeneration_ == windowWheel_.generation()) windowWheel_.pop();
+                    } else if (result == WindowActivation::Failed) {
+                        InterlockedIncrement(&state->windowSwitchDeferredFailed);
+                        windowRetry_ = now + 32;
+                    }
                     windowTicket_ = 0;
                 }
             }
             if (windowInput && !windowTicket_ && now >= windowRetry_) {
                 if (const int direction = windowWheel_.front(now)) {
                     const auto attempt = windowSwitcher_->request(-direction, now);
-                    if (attempt.state == WindowActivation::Confirmed) windowWheel_.pop();
+                    if (attempt.state != WindowActivation::Busy) InterlockedIncrement(&state->windowSwitchAttempts);
+                    if (attempt.state == WindowActivation::Confirmed) {
+                        InterlockedIncrement(&state->windowSwitchConfirmed);
+                        windowWheel_.pop();
+                    }
                     else if (attempt.state == WindowActivation::Pending) {
                         windowTicket_ = attempt.ticket; windowGeneration_ = windowWheel_.generation();
-                    } else if (attempt.state == WindowActivation::Failed) windowRetry_ = now + 32;
+                    } else if (attempt.state == WindowActivation::Failed) {
+                        InterlockedIncrement(&state->windowSwitchRejected);
+                        windowRetry_ = now + 32;
+                    }
                 }
             }
             mouseInput_.configure(config_, sessionActive_ && !paused_);
@@ -2647,6 +2715,8 @@ int wmain(int argc, wchar_t** argv) {
         std::printf("Resolvers: native=%ld; shell=%ld; desktop=%ld (1=offline verified, 2=symbols)\n", record->resolverModeNative, record->resolverModeGate, record->resolverModeDesktop);
         std::printf("Keyboard hold: progressiveSpeed=%ld; replacedRepeats=%ld; releaseFreezes=%ld\n", record->keyboardHoldMultiplier, record->keyboardHoldRepeats, record->keyboardHoldFreezes);
         std::printf("Mouse profile: winWheel=%ld; hooksReady=%ld; ctrlAltWindowWheel=%ld; nativeViewMode=%ld\n", record->winWheel, record->mouseHooksReady, record->wheelWindowSwitch, record->nativeViewMode);
+        std::printf("Start menu mask: initialSent=%ld; initialFailed=%ld; releaseAttempted=%ld\n", record->menuMaskInitialSent, record->menuMaskInitialFailed, record->menuMaskReleaseSent);
+        std::printf("Window wheel: attempts=%ld; confirmed=%ld; immediateFailures=%ld; deferredFailures=%ld\n", record->windowSwitchAttempts, record->windowSwitchConfirmed, record->windowSwitchRejected, record->windowSwitchDeferredFailed);
         std::printf("Read-from-point: disabled=%ld; verifiedHooks=%ld\n", record->disableReading, record->readingReady);
         std::printf("Wheel: enabled=%ld; active=%ld; nativeEvents=%ld\n", record->wheelEnabled, record->wheelActive, record->wheelEvents);
         std::printf("Cursor clip protection: blocked=%ld\n", record->blockedCursorClips);
@@ -2747,7 +2817,111 @@ decltype(&ShowWindow) originalShow = nullptr;
 decltype(&SetWindowPos) originalPosition = nullptr;
 decltype(&CreateWindowExW) originalCreate = nullptr;
 decltype(&SetWindowLongPtrW) originalStyle = nullptr;
-bridge::Mapping mapping;
+// A Magnify.exe launch can be only a short IPC relay to another instance.
+// Resolve hooks locally, but do not publish any native state until this process
+// proves that it owns a real Magnifier UI window and acquires the process lease.
+class NativeMapping : public bridge::Mapping {
+    mutable bridge::Record staged_{};
+    std::atomic<bool> owned_{false};
+    std::atomic<DWORD> ownerPid_{0};
+    HANDLE lease_ = nullptr;
+    std::mutex leaseMutex_;
+    bool initialNormalize_ = false;
+
+    void seedStartupPreferences() {
+        const auto* shared = sharedRecord();
+        if (!shared) return;
+        staged_.hideUi = shared->hideUi;
+        staged_.keyboardStep = shared->keyboardStep;
+        staged_.keyboardHoldMultiplier = shared->keyboardHoldMultiplier;
+        staged_.maxZoomPercent = shared->maxZoomPercent;
+        staged_.disableReading = shared->disableReading;
+        staged_.startAtNormal = shared->startAtNormal;
+        initialNormalize_ = staged_.startAtNormal != 0;
+    }
+
+    void publishClaim(DWORD pid) {
+        auto* shared = sharedRecord();
+        // Copy only native publisher metadata. Never copy host configuration,
+        // pending requests, sources, sequences or accumulated statistics.
+        InterlockedExchange(&shared->nativeCaps, staged_.nativeCaps);
+        InterlockedExchange(&shared->resolverReasonNative, staged_.resolverReasonNative);
+        InterlockedExchange(&shared->resolverModeNative, staged_.resolverModeNative);
+        InterlockedExchange(&shared->nativeError, staged_.nativeError);
+        InterlockedExchange(&shared->nativeViewMode, staged_.nativeViewMode);
+        InterlockedExchange(&shared->readingReady, staged_.readingReady);
+        if (staged_.nativeLevel >= 10000 && staged_.nativeLevel <= 160000)
+            InterlockedExchange(&shared->nativeLevel, staged_.nativeLevel);
+        if (initialNormalize_ && !staged_.startAtNormal)
+            InterlockedCompareExchange(&shared->startAtNormal, 0, 1);
+        InterlockedExchange(&shared->magnifierReady, 0);
+        InterlockedIncrement(&shared->inputRevision);
+        InterlockedIncrement(&shared->zoomRevision);
+        ownerPid_.store(pid);
+        InterlockedExchange(&shared->magnifierPid, static_cast<LONG>(pid));
+        owned_.store(true);
+    }
+
+public:
+    bool open() {
+        if (!bridge::Mapping::open()) return false;
+        // Read-only startup preferences may be needed before UI construction.
+        // All gesture/wheel control remains disabled in this private record.
+        seedStartupPreferences();
+        return true;
+    }
+    bridge::Record* sharedRecord() const { return bridge::Mapping::get(); }
+    bridge::Record* get() const { return owned_.load() ? sharedRecord() : &staged_; }
+    bool owns() const { return owned_.load(); }
+    DWORD ownerPid() const { return ownerPid_.load(); }
+    void reaffirmPid() {
+        if (owns() && sharedRecord()) InterlockedExchange(&sharedRecord()->magnifierPid, static_cast<LONG>(ownerPid()));
+    }
+    bool claim(HWND window) {
+        std::lock_guard lock(leaseMutex_);
+        if (owns()) { reaffirmPid(); return true; }
+        DWORD pid = 0;
+        wchar_t name[96]{};
+        if (!sharedRecord() || !window || !GetWindowThreadProcessId(window, &pid) || pid != GetCurrentProcessId() ||
+            !GetClassNameW(window, name, ARRAYSIZE(name)) ||
+            (wcscmp(name, L"MagUIClass") && wcscmp(name, L"ScreenMagnifierUIWnd"))) return false;
+        // Existence is the lease. Never own a mutex on Windhawk's temporary
+        // injection thread, and never ReleaseMutex from a different thread.
+        HANDLE candidate = CreateMutexW(nullptr, FALSE, L"Local\\KdePinchZoom.NativeOwner.v14");
+        if (!candidate) return false;
+        if (GetLastError() == ERROR_ALREADY_EXISTS) { CloseHandle(candidate); return false; }
+        lease_ = candidate;
+        publishClaim(pid);
+        return true;
+    }
+    void retire(bool releaseLease) {
+        std::lock_guard lock(leaseMutex_);
+        if (owned_.exchange(false) && sharedRecord() &&
+            static_cast<DWORD>(sharedRecord()->magnifierPid) == ownerPid())
+            InterlockedExchange(&sharedRecord()->magnifierReady, 0);
+        if (releaseLease && lease_) { CloseHandle(lease_); lease_ = nullptr; }
+        // If a UI callback could not drain, its pinned DLL retains the lease
+        // until process exit, preventing a newer instance from racing that code.
+    }
+    ~NativeMapping() { retire(true); }
+#ifdef PINCH_ZOOM_NATIVE_TEST
+    void useTestRecord(bridge::Record* record) {
+        bridge::Mapping::useTestRecord(record);
+        ownerPid_.store(GetCurrentProcessId()); owned_.store(true);
+    }
+    void useStagedTestRecord(bridge::Record* record) {
+        bridge::Mapping::useTestRecord(record);
+        staged_ = {}; initialNormalize_ = false; ownerPid_.store(0); owned_.store(false);
+        seedStartupPreferences();
+    }
+    bool claimStagedTestRecord(DWORD pid, bool authenticUi, bool leaseAvailable) {
+        if (!authenticUi || !leaseAvailable || !sharedRecord()) return false;
+        if (!owns()) publishClaim(pid);
+        return true;
+    }
+#endif
+};
+NativeMapping mapping;
 bool role = false;
 bool available = false;
 // Optional Magnifier-only read-from-point entrypoints. No system mouse hook,
@@ -2760,7 +2934,7 @@ std::atomic<bool> readingHooksReady{false};
 extern std::atomic<bool> stopping;
 bool suppressReadPoint() {
     const auto* state = mapping.get();
-    return readingHooksReady.load() && !stopping.load() && state && state->disableReading;
+    return mapping.owns() && readingHooksReady.load() && !stopping.load() && state && state->disableReading;
 }
 void registerReadPoint(void* self) {
     if (!suppressReadPoint()) originalRegisterReadPoint(self);
@@ -2813,16 +2987,66 @@ std::mutex stylesMutex;
 std::map<HWND, LONG_PTR> styles;
 HANDLE stopEvent = nullptr;
 HANDLE thread = nullptr;
+HANDLE ownerProbeThread = nullptr;
+std::atomic<bool> afterInitComplete{false};
+std::atomic<bool> ownerWorkerStarted{false};
+std::mutex workerLifecycle;
+#ifdef PINCH_ZOOM_NATIVE_TEST
+unsigned ownerWorkerStartCount = 0;
+#endif
 std::atomic<HWND> messageWindow{nullptr};
 std::atomic<bool> stopping{false};
 std::atomic<unsigned> activeUpdates{0};
-constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v13";
+constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v14";
 std::atomic<DWORD> uiThread{0};
 std::atomic<void*> nativeSelf{nullptr}; // Dereferenced only on the native rendering thread.
 std::atomic<bool> uiControlReady{false};
 std::atomic<bool> uiPrimeBlocked{false}; // A failed UI prime waits for a real native callback/command.
 thread_local bool applyingPinch = false;
 thread_local unsigned nativeCommandDepth = 0;
+thread_local bool nativeTargetObserved = false;
+thread_local float nativeObservedTarget = 1;
+// A renderer callback is not necessarily a new command: native animation can
+// deliver it after a newer managed objective has already been accepted.
+struct ManagedTargetLease {
+    bridge::InputSource source = bridge::InputSource::None;
+    LONG revision = 0;
+    float target = 1;
+    void* renderer = nullptr;
+};
+std::mutex managedTargetMutex;
+std::optional<ManagedTargetLease> managedTarget;
+bool observesNativeCommands() {
+    const auto* state = mapping.get();
+    return state && (state->nativeCaps & compatibility::NativeKeyboardObserver);
+}
+void releaseManagedTarget() {
+    std::lock_guard lock(managedTargetMutex);
+    managedTarget.reset();
+}
+void acceptManagedTarget(bridge::InputSource source, float level) {
+    std::lock_guard lock(managedTargetMutex);
+    const auto* state = mapping.get();
+    if (!state || !observesNativeCommands() || stopping.load() || !nativeSelf ||
+        !std::isfinite(level) || level < 1 || level > 16) {
+        managedTarget.reset();
+        return;
+    }
+    managedTarget = ManagedTargetLease{source, state->inputRevision, level, nativeSelf.load()};
+}
+bool isManagedTargetEcho(void* renderer) {
+    std::lock_guard lock(managedTargetMutex);
+    if (!managedTarget) return false;
+    const auto* state = mapping.get();
+    if (!state || !observesNativeCommands() || stopping.load() ||
+        (!state->controlEnabled && managedTarget->source != bridge::InputSource::Reset) ||
+        state->inputRevision != managedTarget->revision || renderer != managedTarget->renderer ||
+        nativeSelf.load() != managedTarget->renderer) {
+        managedTarget.reset();
+        return false;
+    }
+    return true;
+}
 constexpr UINT_PTR kKeyboardHoldTimer = 0x4b48;
 constexpr UINT kCancelKeyboardHold = WM_APP + 0x61;
 pinch::KeyboardHold keyboardHold;
@@ -2847,8 +3071,56 @@ decltype(&PostMessageW) keyboardPostMessage = PostMessageW;
 void cancelKeyboardHold(bool seal = true);
 bool freezeKeyboardHold();
 void pollKeyboardHold();
-const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v13");
+const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v14");
+constexpr UINT kClaimNativeOwner = WM_APP + 0x62;
 LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l);
+DWORD WINAPI worker(void*);
+BOOL CALLBACK visibility(HWND, LPARAM);
+void activateNativeOwner() {
+    std::unique_lock lifecycle(workerLifecycle);
+    if (!mapping.owns() || !afterInitComplete.load() || !available || stopping.load()) return;
+    bool expected = false;
+    if (!ownerWorkerStarted.compare_exchange_strong(expected, true)) return;
+#ifdef PINCH_ZOOM_NATIVE_TEST
+    ++ownerWorkerStartCount; // No native thread/window actions in adapter tests.
+#else
+    hiding.store(mapping.get()->hideUi != 0 &&
+        (mapping.get()->magnifierReady || (capabilities & compatibility::NativeBootstrapWindows)));
+    if (stopEvent) thread = CreateThread(nullptr, 0, worker, stopEvent, 0, nullptr);
+    if (!thread) ownerWorkerStarted.store(false);
+    lifecycle.unlock();
+    if (!stopping.load() && mapping.owns()) EnumWindows(visibility, 0);
+#endif
+}
+struct NativeUiSearch { DWORD pid; bool foreign; HWND result = nullptr; };
+BOOL CALLBACK findNativeUiWindow(HWND window, LPARAM parameter) {
+    auto& search = *reinterpret_cast<NativeUiSearch*>(parameter);
+    DWORD pid = 0;
+    wchar_t name[96]{};
+    if (!GetWindowThreadProcessId(window, &pid) || (search.foreign ? pid == search.pid : pid != search.pid) ||
+        !GetClassNameW(window, name, ARRAYSIZE(name))) return TRUE;
+    if (wcscmp(name, L"MagUIClass") && wcscmp(name, L"ScreenMagnifierUIWnd")) return TRUE;
+    search.result = window;
+    return FALSE;
+}
+HWND findNativeUi(bool foreign = false) {
+    NativeUiSearch search{GetCurrentProcessId(), foreign};
+    EnumWindows(findNativeUiWindow, reinterpret_cast<LPARAM>(&search));
+    return search.result;
+}
+bool claimNativeUi() {
+    {
+        std::lock_guard lifecycle(workerLifecycle);
+        if (stopping.load()) return false;
+        if (!mapping.owns()) {
+            const HWND window = findNativeUi();
+            if (!window || !mapping.claim(window)) return false;
+        }
+        mapping.reaffirmPid();
+    }
+    activateNativeOwner();
+    return true;
+}
 void publish(float level) {
     if (mapping.get()) InterlockedExchange(&mapping.get()->nativeLevel, static_cast<LONG>(std::lround(level * 10000)));
 }
@@ -2856,6 +3128,7 @@ void publish(float level) {
 // (native dispatcher RVA7E858). Only the owner thread inspects native options.
 // Control readiness does not require a fullscreen renderer callback at 100%.
 bool refreshControlReady() {
+    if (!claimNativeUi()) { uiControlReady.store(false); return false; }
     auto* state = mapping.get();
     const auto window = messageWindow.load();
     const auto ui = nativeUi.load();
@@ -2985,9 +3258,17 @@ BOOL CALLBACK wakeExistingTree(HWND window, LPARAM) {
     return TRUE;
 }
 void change(void* self, float level, POINT* point) {
-    if (!applyingPinch && !nativeCommandDepth) cancelKeyboardHold();
-    // A native renderer call is itself sufficient evidence of a native command
-    // while pinch is inactive, even when HandleZoomCommand is unavailable.
+    const bool observed = observesNativeCommands();
+    const bool synchronousCommand = !applyingPinch && nativeCommandDepth != 0;
+    if (!applyingPinch && !nativeCommandDepth && isManagedTargetEcho(self)) {
+        // This setter physically retargets the native animator. Replaying an
+        // old callback would reverse the accepted objective. OnMouse/MoveTo
+        // still perform native mouse tracking without going through this path.
+        return;
+    }
+    const bool unobservedCommand = !observed && !applyingPinch && !nativeCommandDepth;
+    if (unobservedCommand) cancelKeyboardHold();
+    // Without the optional observer preserve the original native fallback.
     struct ExternalCommand {
         bool active;
         explicit ExternalCommand(bool value) : active(value) { if (active) ++nativeCommandDepth; }
@@ -3008,10 +3289,14 @@ void change(void* self, float level, POINT* point) {
         point = nullptr;
     }
     const LONG before = mapping.get()->nativeLevel;
-    originalChange(self, level, point); // Preserve all native animations and focus tracking.
-    publish(level);
+    if (synchronousCommand) {
+        nativeTargetObserved = true;
+        nativeObservedTarget = level;
+    }
+    originalChange(self, level, point); // Native animation retains ownership until managed takeover.
+    if (!observed || applyingPinch || synchronousCommand) publish(level);
     rendererGeneration.fetch_add(1);
-    if (!applyingPinch && std::abs(level * 10000.0 - before) >= 1) {
+    if (unobservedCommand && std::abs(level * 10000.0 - before) >= 1) {
         InterlockedExchange(&mapping.get()->appliedSequence, mapping.get()->requestedSequence);
         InterlockedIncrement(&mapping.get()->zoomRevision);
         InterlockedIncrement(&mapping.get()->inputRevision);
@@ -3057,14 +3342,19 @@ BOOL WINAPI clipCursor(const RECT* rectangle) {
 struct NativeCommandScope {
     bool previous = applyingPinch;
     unsigned rendererBefore = rendererGeneration.load();
-    NativeCommandScope() { ++nativeCommandDepth; applyingPinch = false; }
+    NativeCommandScope() {
+        if (!nativeCommandDepth) nativeTargetObserved = false;
+        ++nativeCommandDepth; applyingPinch = false;
+    }
     ~NativeCommandScope() { applyingPinch = previous; --nativeCommandDepth; }
 };
-void nativeCommandComplete(unsigned rendererBefore) {
-    if (applyingPinch) return;
+void nativeCommandComplete(unsigned /*rendererBefore*/) {
+    if (applyingPinch || nativeCommandDepth != 1) return; // One epoch per outermost command.
     void* keeper = nullptr;
     if (FAILED(getKeeper(&keeper)) || !keeper) return;
-    if (rendererGeneration.load() == rendererBefore) publish(getOption(keeper, 14) / 100.0f);
+    // A synchronous setter is an intentional command result, even if the UI
+    // cache lags behind it. Only unscoped animation callbacks are stale echoes.
+    publish(nativeTargetObserved ? nativeObservedTarget : getOption(keeper, 14) / 100.0f);
     InterlockedExchange(&mapping.get()->appliedSequence, mapping.get()->requestedSequence);
     InterlockedIncrement(&mapping.get()->inputRevision);
     InterlockedExchange(&mapping.get()->wheelActive, 0);
@@ -3084,7 +3374,7 @@ void resumeForNativeCommand(bool preserveInput = false) {
     }
 }
 void uiLevel(void* self, long level) {
-    if (!nativeCommandDepth) cancelKeyboardHold();
+    if (!nativeCommandDepth) { cancelKeyboardHold(); releaseManagedTarget(); }
     ensureUi(self);
     resumeForNativeCommand();
     NativeCommandScope scope;
@@ -3172,6 +3462,7 @@ bool freezeKeyboardHold() {
     InterlockedIncrement(&state->zoomRevision);
     InterlockedIncrement(&state->inputRevision);
     InterlockedIncrement(&state->keyboardHoldFreezes);
+    acceptManagedTarget(bridge::InputSource::Keyboard, level);
     return true;
 }
 bool beginKeyboardContinuous(std::uint64_t now) {
@@ -3198,6 +3489,8 @@ bool beginKeyboardContinuous(std::uint64_t now) {
     InterlockedExchange(&state->currentSource, static_cast<LONG>(bridge::InputSource::Keyboard));
     InterlockedIncrement(&state->zoomRevision);
     keyboardHoldRevision = InterlockedIncrement(&state->inputRevision);
+    publish(level);
+    acceptManagedTarget(bridge::InputSource::Keyboard, level);
     return true;
 }
 bool writeKeyboardContinuous(double level) {
@@ -3232,6 +3525,7 @@ bool writeKeyboardContinuous(double level) {
     trackingInitialized.store(level > 1);
     InterlockedExchange(&state->currentSource, static_cast<LONG>(bridge::InputSource::Keyboard));
     publish(static_cast<float>(level));
+    acceptManagedTarget(bridge::InputSource::Keyboard, static_cast<float>(level));
     return true;
 }
 void pollKeyboardHold() {
@@ -3276,6 +3570,7 @@ void zoomCommand(void* self, int command) {
             return; // Only this held native hotkey's repeats are replaced by continuous frames.
         }
     } else if (!nativeCommandDepth) cancelKeyboardHold();
+    releaseManagedTarget(); // Explicit native input wins before Windows handles it.
     resumeForNativeCommand();
     {
         NativeCommandScope scope;
@@ -3326,7 +3621,11 @@ void wheel(void* self, int delta) {
             return;
         }
     }
+    releaseManagedTarget();
+    resumeForNativeCommand();
+    NativeCommandScope scope;
     originalWheel(self, delta); // Lens, opt-out and an absent host retain native behavior.
+    nativeCommandComplete(scope.rendererBefore);
 }
 
 void option(void* self, int name, long value, bool save) {
@@ -3335,6 +3634,7 @@ void option(void* self, int name, long value, bool save) {
     originalOption(self, name, value, save);
     if (name == 4 && mapping.get() && previousMode != getOption(self, 4)) {
         cancelKeyboardHold();
+        releaseManagedTarget();
         // Mode changes can destroy the fullscreen renderer. Do not keep using it.
         InterlockedExchange(&mapping.get()->magnifierReady, 0);
         nativeSelf = nullptr;
@@ -3395,10 +3695,20 @@ bool updateOverview(bool preserveInput) {
         InterlockedIncrement(&state->inputRevision);
         InterlockedExchange(&state->wheelActive, 0);
     }
+    acceptManagedTarget(suspend ? bridge::InputSource::Reset : static_cast<bridge::InputSource>(state->currentSource),
+                        state->nativeLevel / 10000.0f);
     InterlockedExchange(&state->shellApplied, state->shellRevision);
     return true;
 }
 LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
+    if (message == kClaimNativeOwner) {
+        struct ActiveClaim {
+            ActiveClaim() { activeUpdates.fetch_add(1); }
+            ~ActiveClaim() { activeUpdates.fetch_sub(1); }
+        } active;
+        if (!stopping.load()) refreshControlReady();
+        return 0;
+    }
     if (message == kCancelKeyboardHold) { cancelKeyboardHold(w == 0); return 0; }
     if (message == WM_TIMER && w == kKeyboardHoldTimer) {
         // This WndProc callback is not a Windhawk hook. Count it before any
@@ -3530,6 +3840,7 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
             InterlockedExchange(&state->nativeError, 0);
             InterlockedExchange(&state->appliedSequence, sequence);
             if (action) { InterlockedIncrement(&state->nativeCommands); InterlockedIncrement(&state->zoomRevision); InterlockedIncrement(&state->inputRevision); }
+            acceptManagedTarget(action == 3 ? bridge::InputSource::Reset : source, static_cast<float>(delivered));
             refreshControlReady();
         }
         return 0;
@@ -3557,6 +3868,7 @@ void hide(HWND window) {
 }
 BOOL CALLBACK visibility(HWND window, LPARAM) {
     if (!isUi(window)) return TRUE;
+    if (hiding.load() && !mapping.owns()) return TRUE;
     if (hiding.load()) hide(window);
     else {
         std::optional<LONG_PTR> saved;
@@ -3575,14 +3887,14 @@ BOOL CALLBACK visibility(HWND window, LPARAM) {
     return TRUE;
 }
 BOOL WINAPI show(HWND window, int command) {
-    return originalShow(window, hiding.load() && isUi(window) ? SW_HIDE : command);
+    return originalShow(window, hiding.load() && mapping.owns() && isUi(window) ? SW_HIDE : command);
 }
 BOOL WINAPI position(HWND window, HWND after, int x, int y, int width, int height, UINT flags) {
-    if (hiding.load() && isUi(window)) flags = (flags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
+    if (hiding.load() && mapping.owns() && isUi(window)) flags = (flags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
     return originalPosition(window, after, x, y, width, height, flags);
 }
 LONG_PTR WINAPI style(HWND window, int index, LONG_PTR value) {
-    if (hiding.load() && index == GWL_EXSTYLE && isUi(window)) {
+    if (hiding.load() && mapping.owns() && index == GWL_EXSTYLE && isUi(window)) {
         { std::lock_guard lock(stylesMutex); styles.try_emplace(window, GetWindowLongPtrW(window, GWL_EXSTYLE)); }
         value = (value & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
     }
@@ -3591,19 +3903,25 @@ LONG_PTR WINAPI style(HWND window, int index, LONG_PTR value) {
 HWND WINAPI create(DWORD ex, LPCWSTR name, LPCWSTR title, DWORD flags, int x, int y, int width, int height,
                    HWND parent, HMENU menu, HINSTANCE instance, LPVOID parameter) {
     const bool named = reinterpret_cast<ULONG_PTR>(name) > 0xFFFF;
-    if (hiding.load() && named &&
+    if (hiding.load() && mapping.owns() && named &&
         (wcscmp(name, L"MagUIClass") == 0 || wcscmp(name, L"ScreenMagnifierUIWnd") == 0 ||
          (title && wcsstr(title, L"Magnifier Touch")))) flags &= ~WS_VISIBLE;
     const HWND window = originalCreate(ex, name, title, flags, x, y, width, height, parent, menu, instance, parameter);
-    if (window && hiding.load() && isUi(window)) hide(window);
+    if (window && named && (wcscmp(name, L"MagUIClass") == 0 || wcscmp(name, L"ScreenMagnifierUIWnd") == 0)) {
+        // Defer recovery until native window construction has completed.
+        if (const HWND target = messageWindow.load()) PostMessageW(target, kClaimNativeOwner, 0, 0);
+        PostMessageW(window, WM_NULL, 0, 0);
+    }
+    if (window && hiding.load() && mapping.owns() && isUi(window)) hide(window);
     return window;
 }
 
-DWORD WINAPI worker(void*) {
+DWORD WINAPI worker(void* stopParameter) {
+    const HANDLE localStop = static_cast<HANDLE>(stopParameter);
     LONG last = mapping.get()->appliedSequence, lastCommand = -1;
-    const HANDLE events[] = {stopEvent, mapping.wakeEvent()};
+    const HANDLE events[] = {localStop, mapping.wakeEvent()};
     for (;;) {
-        const DWORD result = events[1] ? WaitForMultipleObjects(2, events, FALSE, 250) : WaitForSingleObject(stopEvent, 4);
+        const DWORD result = events[1] ? WaitForMultipleObjects(2, events, FALSE, 250) : WaitForSingleObject(localStop, 4);
         if (result == WAIT_OBJECT_0 || result == WAIT_FAILED) break;
         auto* state = mapping.get();
         if (!state) continue;
@@ -3626,8 +3944,35 @@ DWORD WINAPI worker(void*) {
     }
     return 0;
 }
+DWORD WINAPI probeNativeUiOwner(void* stopParameter) {
+    const HANDLE localStop = static_cast<HANDLE>(stopParameter);
+    // No reading of native C++ objects on this background thread. Supported
+    // instances marshal the claim to their UI helper; unsupported images only
+    // publish their static fallback metadata after a real UI is found.
+    for (unsigned attempt = 0; attempt < 100 && !stopping.load(); ++attempt) {
+        if (mapping.owns()) return 0;
+        if (const HWND nativeWindow = findNativeUi()) {
+            if (!available) {
+                std::lock_guard lifecycle(workerLifecycle);
+                if (stopping.load()) return 0;
+                if (mapping.claim(nativeWindow)) return 0;
+            } else if (const HWND target = messageWindow.load()) {
+                if (PostMessageW(target, kClaimNativeOwner, 0, 0)) return 0;
+            } else {
+                PostMessageW(nativeWindow, WM_NULL, 0, 0);
+            }
+        } else if (findNativeUi(true)) {
+            return 0; // A relay with no own UI has nothing to publish.
+        }
+        if (!localStop || WaitForSingleObject(localStop, 50) != WAIT_TIMEOUT) break;
+    }
+    return 0;
+}
 #ifndef PINCH_ZOOM_NATIVE_TEST
 bool initialize(bool supportedBuild = true) {
+    // Windows may start this executable only to relay Win-plus to its existing
+    // UI. Such a process must not install hooks or reset the owner's mapping.
+    if (!findNativeUi() && findNativeUi(true)) return false;
     if (!mapping.open()) return false;
     role = true;
     InterlockedExchange(&mapping.get()->magnifierReady, 0);
@@ -3693,7 +4038,7 @@ bool initialize(bool supportedBuild = true) {
     moveTo = reinterpret_cast<MoveTo>(targets[8]);
     getOption = reinterpret_cast<GetOption>(targets[2]);
     getKeeper = reinterpret_cast<GetKeeper>(targets[3]);
-    hiding.store(Wh_GetIntSetting(L"hideMagnifier") != 0 && (plan.capabilities & compatibility::NativeBootstrapWindows));
+    hiding.store(false); // A staged process has not proved ownership of any UI.
     keepPointerStable.store(Wh_GetIntSetting(L"keepPointerStable") != 0);
     hooksAttempted = true;
     // Missing optional groups are skipped before any member is installed. An
@@ -3734,36 +4079,44 @@ bool initialize(bool supportedBuild = true) {
 }
 #endif
 void afterInit() {
-    if (!mapping.get()) return;
-    InterlockedExchange(&mapping.get()->magnifierPid, static_cast<LONG>(GetCurrentProcessId()));
-    if (!available) {
-        // Publish that the real process exists, but never hide it, start a
-        // controller worker or intercept controls without a compatible backend.
-        InterlockedExchange(&mapping.get()->magnifierReady, 0);
-        InterlockedExchange(&mapping.get()->nativeCaps, 0);
-        InterlockedExchange(&mapping.get()->nativeError, ERROR_NOT_SUPPORTED);
-        return;
+    if (!mapping.sharedRecord()) return;
+    bool first = false;
+    {
+        std::lock_guard lifecycle(workerLifecycle);
+        if (stopping.load()) return;
+        first = !afterInitComplete.exchange(true);
+#ifndef PINCH_ZOOM_NATIVE_TEST
+        if (first) stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (first && !mapping.owns() && stopEvent)
+            ownerProbeThread = CreateThread(nullptr, 0, probeNativeUiOwner, stopEvent, 0, nullptr);
+#else
+        (void)first;
+#endif
     }
-    // Ready is published by validated owner-thread ensureUi/change.
-    // Do not overwrite a live UI publication from the injector thread.
-    InterlockedIncrement(&mapping.get()->inputRevision);
-    InterlockedIncrement(&mapping.get()->zoomRevision);
-    InterlockedExchange(&mapping.get()->appliedSequence, mapping.get()->requestedSequence);
-    InterlockedExchange(&mapping.get()->pendingCommand, 0);
-    EnumWindows(visibility, 0);
-    EnumWindows(wakeExistingTree, 0);
-    stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (stopEvent) thread = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
+#ifndef PINCH_ZOOM_NATIVE_TEST
+    if (first && !stopping.load()) EnumWindows(wakeExistingTree, 0);
+#endif
+    activateNativeOwner();
 }
 void stop() {
-    if (!available) {
-        if (mapping.get()) InterlockedExchange(&mapping.get()->magnifierReady, 0);
-        return;
+    releaseManagedTarget();
+    bool ownedUi = false;
+    HANDLE localStop = nullptr, localProbe = nullptr, localThread = nullptr;
+    {
+        std::lock_guard lifecycle(workerLifecycle);
+        if (mapping.owns()) mapping.reaffirmPid();
+        ownedUi = mapping.owns() && mapping.sharedRecord() &&
+            static_cast<DWORD>(mapping.sharedRecord()->magnifierPid) == mapping.ownerPid();
+        stopping.store(true);
+        mapping.retire(false); // Every later callback is redirected to the shadow.
+        localStop = stopEvent; localProbe = ownerProbeThread; localThread = thread;
+        stopEvent = nullptr; ownerProbeThread = nullptr; thread = nullptr;
+        if (localStop) SetEvent(localStop);
     }
-    stopping.store(true);
-    if (mapping.get()) InterlockedExchange(&mapping.get()->magnifierReady, 0);
-    if (stopEvent) SetEvent(stopEvent);
-    if (thread) { WaitForSingleObject(thread, INFINITE); CloseHandle(thread); }
+    // Never join while holding workerLifecycle: a probe can be finishing its
+    // guarded claim and a UI callback can be completing activation.
+    if (localProbe) { WaitForSingleObject(localProbe, INFINITE); CloseHandle(localProbe); }
+    if (localThread) { WaitForSingleObject(localThread, INFINITE); CloseHandle(localThread); }
     const HWND target = messageWindow.load();
     bool drained = !target;
     if (target && uiThread.load() == GetCurrentThreadId()) {
@@ -3787,9 +4140,10 @@ void stop() {
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                           reinterpret_cast<LPCWSTR>(&messages), &pinned);
     }
-    if (stopEvent) CloseHandle(stopEvent);
+    if (localStop) CloseHandle(localStop);
     hiding.store(false);
-    EnumWindows(visibility, 0);
+    if (ownedUi && available) EnumWindows(visibility, 0);
+    mapping.retire(drained);
 }
 }  // namespace magnifier
 
@@ -4130,6 +4484,7 @@ pinch::Config settings() {
     config.wheelStep = std::clamp(Wh_GetIntSetting(L"wheelStep"), 1, 100);
     config.wheelDuration = std::clamp(Wh_GetIntSetting(L"wheelDuration"), 40, 250);
     config.wheelMaxRate = std::clamp(Wh_GetIntSetting(L"wheelMaxRate"), 50, 2000);
+    config.wheelFreeSpinMaxRate = std::clamp(Wh_GetIntSetting(L"wheelFreeSpinMaxRate"), 0, 2000);
     config.keyboardStep = std::clamp(Wh_GetIntSetting(L"keyboardStep"), 0, 1000);
     config.keyboardHoldMultiplier = std::clamp(Wh_GetIntSetting(L"keyboardHoldMultiplier"), 1, 4);
     config.edgeMargin = std::clamp(Wh_GetIntSetting(L"edgeMargin"), 0, 40) / 100.0;
