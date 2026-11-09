@@ -2,6 +2,8 @@
 
 ## 0.7.0 — 2026-11-09 (experimental)
 
+- Ganancia predeterminada de rueda al 35 %, conservando deltas fraccionarios y límite de velocidad.
+- Ciclado completo de ventanas por cada muesca, incluidas ráfagas, con confirmación asíncrona del foco; los fallos no avanzan el orden ni reinician bucles de dos ventanas.
 - Perfil Win+rueda para zoom, Win+clic central al 100 % y Ctrl+Alt+rueda para recorrer ventanas. Perfil anterior Ctrl+Alt configurable. Acciones extra de maximizar/restaurar/minimizar opcionales, desactivadas por defecto.
 - Hilo dedicado para hooks breves, resincronización tras bloqueo y ruta sin sondeos de teclas para movimientos normales del ratón; teclado observado siempre pasante. Máscara neutral una vez por pulsación Win consumida; no se sintetizan modificadores. DOWN/UP emparejados aunque se suelte el modificador primero.
 - Teclado mantenido progresivo tras 200 ms, sin multiplicar saltos nativos. Factor continuo, reloj acotado y detención en el nivel/posición visibles; inversión sin arrastrar objetivos adelantados.

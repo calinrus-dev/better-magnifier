@@ -22,7 +22,7 @@
 
 // ==WindhawkModReadme==
 /*
-# Better Magnifier — experimental
+# Better Magnifier â€” experimental
 
 Spread three fingers to magnify the desktop; pinch them together to zoom out.
 Win+mouse wheel provides proportional smooth zoom; Win+middle click resets.
@@ -87,7 +87,7 @@ https://github.com/calinrus-dev/better-magnifier
 - disableReading: true
   $name: Disable Magnifier click-to-read and its reading cursor
   $description: Blocks Magnifier Ctrl+Alt + left-click reading and its special cursor on verified builds. Does not disable Narrator or intercept ordinary left clicks.
-- wheelStep: 20
+- wheelStep: 35
   $name: Wheel zoom per notch (%)
   $description: Proportional change per 120 wheel units. High-resolution wheel deltas retain their precision.
 - wheelDuration: 100
@@ -267,7 +267,7 @@ struct Config {
     bool wheelWindowSwitch = true;
     bool windowButtons = false;
     bool disableReading = true;
-    int wheelStep = 20;
+    int wheelStep = 35;
     int wheelDuration = 100;
     int wheelMaxRate = 400;
     bool instantHorizontalSwitch = true;
@@ -531,7 +531,7 @@ class WindowCycle {
     std::uintptr_t last_ = 0;
 public:
     std::uintptr_t next(const std::vector<std::uintptr_t>& available, std::uintptr_t current, int step) {
-        if (current != last_) order_ = available;
+        if (current != last_) { order_ = available; last_ = current; }
         else {
             std::erase_if(order_, [&](auto window) { return std::find(available.begin(), available.end(), window) == available.end(); });
             for (auto window : available) if (std::find(order_.begin(), order_.end(), window) == order_.end()) order_.push_back(window);
@@ -540,10 +540,13 @@ public:
         const auto found = std::find(order_.begin(), order_.end(), current);
         const int size = static_cast<int>(order_.size());
         const int index = found == order_.end() ? (step > 0 ? -1 : 0) : static_cast<int>(found - order_.begin());
-        last_ = order_[static_cast<std::size_t>((index + step + size) % size)];
-        return last_;
+        return order_[static_cast<std::size_t>((index + step + size) % size)];
     }
+    // Selecting a candidate is not activation. Failed or deferred attempts must
+    // not change the cycle's acknowledged foreground window.
+    void commit(std::uintptr_t window) { if (window) last_ = window; }
 };
+
 inline int swipeDirection(Point movement) {
     if (std::abs(movement.x) > std::abs(movement.y) * 1.25) return movement.x < 0 ? -1 : 1;
     return movement.y < 0 ? -2 : 2;
@@ -663,27 +666,34 @@ public:
 };
 
 // Window switching is discrete even for free-spinning/high-resolution wheels.
-// No timer flushes this accumulator: pending movement needs a fresh wheel event.
+// A bounded queue preserves complete notches until foreground confirmation.
+// One step is dispatched per frame; stale bursts expire rather than replay.
 class WindowWheel {
-    int residual_ = 0;
-    std::uint64_t lastInput_ = 0, lastAction_ = 0;
-    bool haveInput_ = false, haveAction_ = false;
+    int residual_ = 0, queued_ = 0, direction_ = 0;
+    std::uint64_t lastInput_ = 0, generation_ = 0;
+    bool haveInput_ = false;
+    void expire(std::uint64_t now) { if (haveInput_ && (now < lastInput_ || now - lastInput_ > 200)) reset(); }
 public:
-    void reset() { residual_ = 0; lastInput_ = lastAction_ = 0; haveInput_ = haveAction_ = false; }
-    std::optional<int> feed(int delta, std::uint64_t now) {
-        if (!delta) return std::nullopt;
-        if ((haveInput_ && now < lastInput_) || (haveAction_ && now < lastAction_)) reset();
-        if (haveInput_ && now - lastInput_ > 200) residual_ = 0;
-        if (residual_ && ((residual_ < 0) != (delta < 0))) residual_ = 0;
-        lastInput_ = now; haveInput_ = true;
+    void reset() { residual_ = queued_ = direction_ = 0; lastInput_ = 0; haveInput_ = false; ++generation_; }
+    void offer(int delta, std::uint64_t now) {
+        if (!delta) return;
+        expire(now);
+        const int direction = delta > 0 ? -1 : 1;
+        if (direction_ && direction != direction_) reset();
+        direction_ = direction; lastInput_ = now; haveInput_ = true;
         const auto total = static_cast<std::int64_t>(residual_) + delta;
-        const bool cooling = haveAction_ && now - lastAction_ < 125;
-        residual_ = static_cast<int>(std::clamp<std::int64_t>(total, cooling ? -120 : -240, cooling ? 120 : 240));
-        if (cooling || (residual_ > -120 && residual_ < 120)) return std::nullopt;
-        const int sign = residual_ < 0 ? -1 : 1;
-        residual_ -= sign * 120;
-        lastAction_ = now; haveAction_ = true;
-        return -sign; // Positive wheel = previous window; negative wheel = next.
+        const auto steps = -(total / 120);
+        residual_ = static_cast<int>(total % 120);
+        queued_ = static_cast<int>(std::clamp<std::int64_t>(queued_ + steps, -6, 6));
+    }
+    int front(std::uint64_t now) { expire(now); return queued_ < 0 ? -1 : queued_ > 0 ? 1 : 0; }
+    int pending(std::uint64_t now) { expire(now); return queued_; }
+    std::uint64_t generation() const { return generation_; }
+    void pop() { if (queued_) queued_ += queued_ < 0 ? 1 : -1; }
+    std::optional<int> feed(int delta, std::uint64_t now) {
+        offer(delta, now); const int direction = front(now);
+        if (!direction) return std::nullopt;
+        pop(); return direction;
     }
 };
 
@@ -1492,9 +1502,42 @@ struct Statistics {
     unsigned devices = 0;
 };
 
+enum class WindowActivation { Failed, Busy, Pending, Confirmed };
+struct WindowAttempt { std::uint64_t ticket = 0; WindowActivation state = WindowActivation::Failed; };
 class WindowSwitcher {
+#ifdef PINCH_ZOOM_RUNTIME_TEST
+    friend struct WindowSwitcherTestAccess;
+    inline static decltype(&EnumWindows) apiEnumerate = EnumWindows;
+    inline static decltype(&GetForegroundWindow) apiForeground = GetForegroundWindow;
+    inline static decltype(&SetForegroundWindow) apiActivate = SetForegroundWindow;
+    inline static decltype(&GetAncestor) apiAncestor = GetAncestor;
+    inline static decltype(&IsWindow) apiValid = IsWindow;
+    inline static decltype(&IsIconic) apiIconic = IsIconic;
+    inline static decltype(&ShowWindowAsync) apiShow = ShowWindowAsync;
+#else
+    inline static const auto apiEnumerate = EnumWindows;
+    inline static const auto apiForeground = GetForegroundWindow;
+    inline static const auto apiActivate = SetForegroundWindow;
+    inline static const auto apiAncestor = GetAncestor;
+    inline static const auto apiValid = IsWindow;
+    inline static const auto apiIconic = IsIconic;
+    inline static const auto apiShow = ShowWindowAsync;
+#endif
     pinch::WindowCycle cycle_;
     std::mutex mutex_;
+    std::uint64_t serial_ = 0, pending_ = 0, started_ = 0;
+    HWND target_ = nullptr, origin_ = nullptr;
+    std::array<WindowAttempt, 16> completed_{};
+    void finish(WindowActivation state) {
+        if (state == WindowActivation::Confirmed) cycle_.commit(reinterpret_cast<std::uintptr_t>(target_));
+        completed_[pending_ % completed_.size()] = {pending_, state}; pending_ = 0;
+    }
+    void pollLocked(std::uint64_t now) {
+        if (!pending_) return;
+        const HWND current = apiAncestor(apiForeground(), GA_ROOT);
+        if (current == target_) finish(WindowActivation::Confirmed);
+        else if (!apiValid(target_) || current != origin_ || now < started_ || now - started_ >= 150) finish(WindowActivation::Failed);
+    }
     static BOOL CALLBACK collect(HWND window, LPARAM parameter) {
         if (!IsWindowVisible(window) || !IsWindowEnabled(window)) return TRUE;
         const LONG_PTR style = GetWindowLongPtrW(window, GWL_EXSTYLE);
@@ -1502,7 +1545,7 @@ class WindowSwitcher {
         if (window == GetShellWindow() || window == GetDesktopWindow()) return TRUE;
         wchar_t name[96]{};
         GetClassNameW(window, name, ARRAYSIZE(name));
-        for (const auto* excluded : {L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd", L"Progman", L"WorkerW", L"XamlExplorerHostIslandWindow"})
+        for (const auto* excluded : {L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd", L"Progman", L"WorkerW", L"XamlExplorerHostIslandWindow", L"#32768", L"ComboLBox", L"tooltips_class32"})
             if (wcscmp(name, excluded) == 0) return TRUE;
         DWORD cloaked = 0;
         if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) return TRUE;
@@ -1526,19 +1569,41 @@ public:
         std::vector<std::uintptr_t> found; collect(window, reinterpret_cast<LPARAM>(&found));
         return !found.empty();
     }
-    bool activate(int direction) {
+    void poll(std::uint64_t now) { std::lock_guard lock(mutex_); pollLocked(now); }
+    WindowActivation status(std::uint64_t ticket, std::uint64_t now) {
+        std::lock_guard lock(mutex_); pollLocked(now);
+        if (pending_ == ticket) return WindowActivation::Pending;
+        const auto& result = completed_[ticket % completed_.size()];
+        return result.ticket == ticket ? result.state : WindowActivation::Failed;
+    }
+    WindowAttempt request(int direction, std::uint64_t now) {
         std::vector<std::uintptr_t> windows;
-        EnumWindows(collect, reinterpret_cast<LPARAM>(&windows));
-        HWND current = GetAncestor(GetForegroundWindow(), GA_ROOT);
-        HWND target = nullptr;
+        if (!apiEnumerate(collect, reinterpret_cast<LPARAM>(&windows))) return {};
+        HWND target = nullptr; std::uint64_t ticket = 0;
         {
-            std::lock_guard lock(mutex_);
+            std::lock_guard lock(mutex_); pollLocked(now);
+            if (pending_) return {0, WindowActivation::Busy};
+            const HWND current = apiAncestor(apiForeground(), GA_ROOT);
             target = reinterpret_cast<HWND>(cycle_.next(windows, reinterpret_cast<std::uintptr_t>(current), direction < 0 ? 1 : -1));
+            if (!target || target == current || !apiValid(target)) return {};
+            ticket = ++serial_; pending_ = ticket; target_ = target; origin_ = current; started_ = now;
         }
-        if (!target || target == current || !IsWindow(target)) return false;
-        if (IsIconic(target)) ShowWindowAsync(target, SW_RESTORE);
-        if (!SetForegroundWindow(target)) return false;
-        return GetAncestor(GetForegroundWindow(), GA_ROOT) == target;
+        // Foreground activation can be asynchronous across GUI threads. Never
+        // wait here or hold the cycle mutex while calling another window.
+        if (apiIconic(target)) apiShow(target, SW_RESTORE);
+        const BOOL accepted = apiActivate(target);
+        std::lock_guard lock(mutex_);
+        if (pending_ == ticket) {
+            pollLocked(now);
+            if (pending_ == ticket && !accepted) finish(WindowActivation::Failed);
+        }
+        if (pending_ == ticket) return {ticket, WindowActivation::Pending};
+        const auto& result = completed_[ticket % completed_.size()];
+        return result.ticket == ticket ? result : WindowAttempt{ticket, WindowActivation::Failed};
+    }
+    bool activate(int direction) {
+        const auto result = request(direction, GetTickCount64());
+        return result.state == WindowActivation::Pending || result.state == WindowActivation::Confirmed;
     }
 };
 inline WindowSwitcher switcher;
@@ -1749,6 +1814,8 @@ class Host {
     LONG wheelRevision_ = 0;
     MouseInputBroker mouseInput_;
     pinch::WindowWheel windowWheel_;
+    WindowSwitcher* windowSwitcher_ = &switcher;
+    std::uint64_t windowTicket_ = 0, windowGeneration_ = 0, windowRetry_ = 0;
     int coldWheelDelta_ = 0;
     std::uint64_t coldWheelDeadline_ = 0;
     LONG coldWheelCommands_ = 0;
@@ -1844,10 +1911,28 @@ class Host {
             }
             const auto windowPacket = static_cast<std::uint64_t>(InterlockedExchange64(&state->windowWheelPacket, 0));
             const auto windowTime = static_cast<std::uint64_t>(InterlockedCompareExchange64(&state->windowWheelTime, 0, 0));
-            if (!paused_ && sessionActive_ && config_.winWheel && config_.wheelWindowSwitch && config_.enabled && !config_.observeOnly &&
-                (windowTime >= now || now - windowTime <= 200)) {
-                if (const auto direction = windowWheel_.feed(pinch::wheelDelta(windowPacket), now)) activateWindow(-*direction);
-            } else windowWheel_.reset();
+            const bool windowInput = !paused_ && sessionActive_ && config_.winWheel && config_.wheelWindowSwitch && config_.enabled && !config_.observeOnly;
+            if (windowInput && (windowTime >= now || now - windowTime <= 200))
+                windowWheel_.offer(pinch::wheelDelta(windowPacket), now);
+            else if (!windowInput) windowWheel_.reset();
+            windowSwitcher_->poll(now);
+            if (windowTicket_) {
+                const auto result = windowSwitcher_->status(windowTicket_, now);
+                if (result != WindowActivation::Pending) {
+                    if (result == WindowActivation::Confirmed && windowGeneration_ == windowWheel_.generation()) windowWheel_.pop();
+                    else if (result == WindowActivation::Failed) windowRetry_ = now + 32;
+                    windowTicket_ = 0;
+                }
+            }
+            if (windowInput && !windowTicket_ && now >= windowRetry_) {
+                if (const int direction = windowWheel_.front(now)) {
+                    const auto attempt = windowSwitcher_->request(-direction, now);
+                    if (attempt.state == WindowActivation::Confirmed) windowWheel_.pop();
+                    else if (attempt.state == WindowActivation::Pending) {
+                        windowTicket_ = attempt.ticket; windowGeneration_ = windowWheel_.generation();
+                    } else if (attempt.state == WindowActivation::Failed) windowRetry_ = now + 32;
+                }
+            }
             mouseInput_.configure(config_, sessionActive_ && !paused_);
             if (deliverColdPinch) applyColdPinch(now);
 

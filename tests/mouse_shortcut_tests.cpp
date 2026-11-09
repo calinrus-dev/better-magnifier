@@ -52,25 +52,22 @@ int main() {
     }
     {
         pinch::WindowWheel wheel;
-        require(!wheel.feed(30, 0) && !wheel.feed(30, 1) && !wheel.feed(30, 2), "fractional wheel messages do not switch one window each");
-        require(wheel.feed(30, 3) == -1, "one positive wheel notch selects the previous window");
-        require(!wheel.feed(-30, 4) && !wheel.feed(-30, 5) && !wheel.feed(-30, 6), "reversal clears old direction and retains new fractional movement");
-        require(wheel.feed(-30, 128) == 1, "one negative notch selects the next window after the switching cooldown");
-        wheel.reset();
-        require(wheel.feed(120, 1000) == -1, "ordinary discrete wheels switch immediately on their first notch");
-        unsigned actions = 0;
-        for (unsigned now = 1001; now < 1125; ++now) if (wheel.feed(32767, now)) ++actions;
-        require(!actions, "a rapid free-spin burst cannot exceed the window-switch cooldown");
-        require(wheel.feed(1, 1125) == -1, "at most one pending window step becomes available on fresh input");
-        require(!wheel.feed(0, 3000), "idle time never flushes buffered window switches by itself");
-        require(!wheel.feed(1, 3001), "a stale burst is not replayed when later fine input arrives");
-        wheel.reset(); wheel.feed(119, 0);
-        require(!wheel.feed(-1, 1), "tiny reversal cannot complete an old nearly-full notch");
-        require(wheel.feed(-119, 2) == 1, "new direction reaches its own complete notch");
-        require(!wheel.feed(119, 1000) && !wheel.feed(1, 1201), "fractional residual expires after an input gap");
-        wheel.reset();
-        require(wheel.feed(std::numeric_limits<int>::min(), 5) == 1, "extreme signed wheel deltas remain bounded without integer overflow");
-        require(wheel.feed(120, 4) == -1, "a clock rollback resets the cooldown rather than blocking future window changes");
+        require(!wheel.feed(30, 0) && !wheel.feed(30, 1) && !wheel.feed(30, 2), "fractional packets accumulate");
+        require(wheel.feed(30, 3) == -1, "one notch selects previous");
+        require(wheel.feed(-120, 4) == 1 && wheel.feed(-120, 5) == 1, "consecutive full notches have no artificial cooldown");
+        wheel.reset(); wheel.offer(-240, 1000);
+        require(wheel.pending(1000) == 2 && wheel.front(1000) == 1, "aggregated two notches retain two steps");
+        wheel.pop(); require(wheel.pending(1016) == 1, "first acknowledged step leaves second queued");
+        wheel.pop(); require(!wheel.front(1032), "two acknowledgments consume exactly two notches");
+        wheel.offer(-360, 1100); const auto generation = wheel.generation(); wheel.offer(120, 1101);
+        require(wheel.pending(1101) == -1 && wheel.generation() != generation, "reverse replaces old queued direction immediately");
+        wheel.reset(); wheel.offer(119, 0); wheel.offer(-1, 1);
+        require(!wheel.front(1), "reversal discards old fractional debt");
+        wheel.offer(-119, 2); require(wheel.front(2) == 1, "reverse reaches its own full notch");
+        wheel.reset(); wheel.offer(32767, 2000);
+        require(wheel.pending(2000) == -6, "free spin queue is bounded to six recent windows");
+        require(!wheel.front(2201), "stale queued switches expire without replay");
+        wheel.offer(120, 3000); require(!wheel.front(2999), "clock reset clears queued intent");
     }
     {
         pinch::MouseButtonOwnership buttons;

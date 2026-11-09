@@ -26,9 +26,42 @@ BOOL WINAPI querySession(HANDLE, DWORD, WTS_INFO_CLASS, LPWSTR* data, DWORD* byt
 }
 void WINAPI freeSession(PVOID) {}
 
+std::vector<std::uintptr_t> windowList{1, 2, 3};
+HWND foreground = reinterpret_cast<HWND>(1), requestedWindow = nullptr;
+unsigned windowRequests = 0;
+enum class ActivationMode { Immediate, Deferred, Reject };
+ActivationMode activationMode = ActivationMode::Immediate;
+BOOL WINAPI enumerateWindows(WNDENUMPROC, LPARAM parameter) {
+    *reinterpret_cast<std::vector<std::uintptr_t>*>(parameter) = windowList; return TRUE;
+}
+HWND WINAPI foregroundWindow() { return foreground; }
+HWND WINAPI rootWindow(HWND window, UINT) { return window; }
+BOOL WINAPI validWindow(HWND window) {
+    return std::find(windowList.begin(), windowList.end(), reinterpret_cast<std::uintptr_t>(window)) != windowList.end();
+}
+BOOL WINAPI iconicWindow(HWND) { return FALSE; }
+BOOL WINAPI showWindow(HWND, int) { return TRUE; }
+BOOL WINAPI activateWindow(HWND window) {
+    ++windowRequests; requestedWindow = window;
+    if (activationMode == ActivationMode::Reject) return FALSE;
+    if (activationMode == ActivationMode::Immediate) foreground = window;
+    return TRUE;
+}
+void resetWindows(ActivationMode mode = ActivationMode::Immediate) {
+    windowList = {1, 2, 3}; foreground = reinterpret_cast<HWND>(1);
+    requestedWindow = nullptr; windowRequests = 0; activationMode = mode;
+}
+
 }
 
 namespace runtime {
+struct WindowSwitcherTestAccess {
+    static void fake() {
+        WindowSwitcher::apiEnumerate = enumerateWindows; WindowSwitcher::apiForeground = foregroundWindow;
+        WindowSwitcher::apiActivate = ::activateWindow; WindowSwitcher::apiAncestor = rootWindow;
+        WindowSwitcher::apiValid = validWindow; WindowSwitcher::apiIconic = iconicWindow; WindowSwitcher::apiShow = showWindow;
+    }
+};
 struct HostTestAccess {
     static void prepare(Host& host, bridge::Record& record) {
         host.bridge_.useTestRecord(&record);
@@ -43,6 +76,8 @@ struct HostTestAccess {
     }
     static void input(Host& host, int delta, LONG epoch, ULONGLONG now) { host.wheelInput(delta, epoch, now); }
     static void tick(Host& host, ULONGLONG now) { host.render(now); }
+    static void windows(Host& host, WindowSwitcher& backend) { host.windowSwitcher_ = &backend; }
+    static int windowPending(Host& host, ULONGLONG now) { return host.windowWheel_.pending(now); }
     static void cancel(Host& host) { host.cancelWheel(); }
     static bool active(Host& host) { return host.wheel_.active(); }
     static double goal(Host& host) { return host.wheel_.goal(); }
@@ -505,6 +540,70 @@ int wmain(int argc, wchar_t** argv) {
         runtime::HostTestAccess::tick(fixture.host, 1100);
         require(!runtime::HostTestAccess::seedPending(fixture.host, pinchDevice) && fixture.record.requestedSequence == 0,
                 "a lens-mode transition cannot carry an old cold intent into a later fullscreen view");
+    }
+    // Fake foreground endpoints exercise asynchronous GUI activation without
+    // enumerating, focusing, restoring or sending input to desktop windows.
+    runtime::WindowSwitcherTestAccess::fake();
+    {
+        resetWindows(); runtime::WindowSwitcher backend;
+        require(backend.request(-1, 1000).state == runtime::WindowActivation::Confirmed && foreground == reinterpret_cast<HWND>(2), "window next confirms B");
+        windowList = {2, 1, 3};
+        require(backend.request(-1, 1016).state == runtime::WindowActivation::Confirmed && foreground == reinterpret_cast<HWND>(3), "window next continues C despite MRU reordering");
+        windowList = {3, 2, 1};
+        backend.request(-1, 1032);
+        require(foreground == reinterpret_cast<HWND>(1), "three window forward cycle wraps A");
+        backend.request(1, 1048); require(foreground == reinterpret_cast<HWND>(3), "reverse immediately selects previous C");
+        backend.request(1, 1064); require(foreground == reinterpret_cast<HWND>(2), "reverse continues B rather than bouncing two apps");
+    }
+    {
+        resetWindows(ActivationMode::Reject); runtime::WindowSwitcher backend;
+        require(backend.request(-1, 1000).state == runtime::WindowActivation::Failed, "rejected activation reports failure");
+        windowList = {1, 3, 2}; activationMode = ActivationMode::Immediate;
+        require(backend.request(-1, 1032).state == runtime::WindowActivation::Confirmed && foreground == reinterpret_cast<HWND>(2), "failed focus never advances cycle or skips candidate");
+    }
+    {
+        resetWindows(ActivationMode::Deferred); runtime::WindowSwitcher backend;
+        const auto first = backend.request(-1, 1000);
+        require(first.state == runtime::WindowActivation::Pending && foreground == reinterpret_cast<HWND>(1), "accepted asynchronous activation waits for real foreground");
+        require(backend.request(-1, 1016).state == runtime::WindowActivation::Busy && windowRequests == 1, "pending focus prevents another activation dispatch");
+        foreground = requestedWindow;
+        require(backend.status(first.ticket, 1032) == runtime::WindowActivation::Confirmed, "later foreground confirmation commits pending candidate");
+        backend.request(-1, 1048); require(requestedWindow == reinterpret_cast<HWND>(3), "confirmed deferred switch proceeds to third window");
+    }
+    {
+        resetWindows(ActivationMode::Deferred); runtime::WindowSwitcher backend;
+        const auto first = backend.request(-1, 1000);
+        require(backend.status(first.ticket, 1150) == runtime::WindowActivation::Failed, "unconfirmed activation expires after bounded wait");
+        backend.request(-1, 1151); require(requestedWindow == reinterpret_cast<HWND>(2), "timeout retries same window without advancing cycle");
+    }
+    {
+        resetWindows(); runtime::WindowSwitcher backend; HostFixture fixture(210);
+        runtime::HostTestAccess::windows(fixture.host, backend);
+        const auto writes = transformWrites;
+        bridge::enqueueWindowWheel(&fixture.record, -240, 1000);
+        runtime::HostTestAccess::tick(fixture.host, 1000);
+        require(windowRequests == 1 && foreground == reinterpret_cast<HWND>(2) && runtime::HostTestAccess::windowPending(fixture.host, 1000) == 1, "aggregated first notch dispatches one window per frame");
+        runtime::HostTestAccess::tick(fixture.host, 1016);
+        require(windowRequests == 2 && foreground == reinterpret_cast<HWND>(3) && !runtime::HostTestAccess::windowPending(fixture.host, 1016), "second aggregated notch dispatches without another wheel event");
+        require(transformWrites == writes, "window cycling does not write zoom transforms");
+    }
+    {
+        resetWindows(); runtime::WindowSwitcher backend; HostFixture fixture(211);
+        runtime::HostTestAccess::windows(fixture.host, backend);
+        bridge::enqueueWindowWheel(&fixture.record, -360, 2000); runtime::HostTestAccess::tick(fixture.host, 2000);
+        bridge::enqueueWindowWheel(&fixture.record, 120, 2016); runtime::HostTestAccess::tick(fixture.host, 2016);
+        require(windowRequests == 2 && foreground == reinterpret_cast<HWND>(1) && !runtime::HostTestAccess::windowPending(fixture.host, 2016), "direction reversal drops older queued steps and switches back immediately");
+    }
+    {
+        resetWindows(ActivationMode::Deferred); runtime::WindowSwitcher backend; HostFixture fixture(212);
+        runtime::HostTestAccess::windows(fixture.host, backend);
+        bridge::enqueueWindowWheel(&fixture.record, -240, 3000); runtime::HostTestAccess::tick(fixture.host, 3000);
+        runtime::HostTestAccess::tick(fixture.host, 3016);
+        require(windowRequests == 1 && runtime::HostTestAccess::windowPending(fixture.host, 3016) == 2, "host retains all steps while foreground activation is pending");
+        foreground = requestedWindow; runtime::HostTestAccess::tick(fixture.host, 3032);
+        require(windowRequests == 2 && requestedWindow == reinterpret_cast<HWND>(3) && runtime::HostTestAccess::windowPending(fixture.host, 3032) == 1, "host confirms first then dispatches second asynchronous step exactly once");
+        foreground = requestedWindow; runtime::HostTestAccess::tick(fixture.host, 3048);
+        require(!runtime::HostTestAccess::windowPending(fixture.host, 3048) && windowRequests == 2, "second foreground acknowledgement drains two-notch queue");
     }
     if (argc != 2) {
         std::cerr << "Usage: runtime-tests path-to-mod.dll\n";

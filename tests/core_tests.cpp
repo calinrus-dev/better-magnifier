@@ -355,20 +355,27 @@ int main() {
     });
     test("direct window swipes keep a stable cycle despite activation changing z-order", [] {
         pinch::WindowCycle cycle;
-        require(cycle.next({1, 2, 3}, 1, 1) == 2, "first next window");
-        require(cycle.next({2, 1, 3}, 2, 1) == 3, "cycle collapsed to last two windows");
+        require(cycle.next({1, 2, 3}, 1, 1) == 2, "first next window"); cycle.commit(2);
+        require(cycle.next({2, 1, 3}, 2, 1) == 3, "cycle collapsed to last two windows"); cycle.commit(3);
         require(cycle.next({3, 2, 1}, 3, -1) == 2, "reverse window direction");
     });
     test("external window activation resets the direct swipe order", [] {
         pinch::WindowCycle cycle;
-        cycle.next({1, 2, 3}, 1, 1);
+        cycle.next({1, 2, 3}, 1, 1); cycle.commit(2);
         require(cycle.next({3, 1, 2}, 3, 1) == 1, "external activation ignored");
     });
     test("closed windows are removed from the direct swipe cycle", [] {
         pinch::WindowCycle cycle;
-        cycle.next({1, 2, 3}, 1, 1);
-        require(cycle.next({2, 1}, 2, 1) == 1, "closed window remained selectable");
+        cycle.next({1, 2, 3}, 1, 1); cycle.commit(2);
+        require(cycle.next({2, 1}, 2, 1) == 1, "closed window remained selectable"); cycle.commit(1);
         require(cycle.next({1}, 1, 1) == 0, "single window should not be switched");
+    });
+    test("rejected foreground activation preserves the pending window candidate", [] {
+        pinch::WindowCycle cycle;
+        require(cycle.next({1, 2, 3}, 1, 1) == 2, "initial candidate");
+        require(cycle.next({1, 3, 2}, 1, 1) == 2, "failure advanced cycle or reordered it");
+        cycle.commit(2);
+        require(cycle.next({2, 1, 3}, 2, 1) == 3, "confirmed switch resumes full cycle");
     });
     test("swipe direction separates vertical multitasking from direct lateral switching", [] {
         require(pinch::swipeDirection({-4, 0.5}) == -1, "left direction");
@@ -504,12 +511,21 @@ int main() {
         packet = pinch::mergeWheel(packet, -32768, 0xFFFFFFFFu);
         require(pinch::wheelDelta(packet) == -1200, "negative packet overflow");
     });
-    test("default wheel notch remains twenty percent with a speed limit", [] {
+    test("a configured twenty percent wheel notch retains its amount with a speed limit", [] {
         pinch::WheelMotion a, b, c;
         a.add(120, 2, 100, 20, 100, 16, 400);
         for (int i=0; i<4; ++i) b.add(30, 2, 100, 20, 100, 16, 400);
         for (int i=0; i<120; ++i) c.add(1, 2, 100, 20, 100, 16, 400);
         near(a.goal(), 2.4); near(a.goal(), b.goal()); near(a.goal(), c.goal());
+    });
+    test("the stronger default wheel gain preserves high-resolution precision", [] {
+        const pinch::Config defaults;
+        require(defaults.wheelStep == 35, "factory wheel gain differs from the documented profile");
+        pinch::WheelMotion a, b, c;
+        a.add(120, 2, 100, defaults.wheelStep, 100, 16, 400);
+        for (int i=0; i<4; ++i) b.add(30, 2, 100, defaults.wheelStep, 100, 16, 400);
+        for (int i=0; i<120; ++i) c.add(1, 2, 100, defaults.wheelStep, 100, 16, 400);
+        near(a.goal(), 2.7); near(a.goal(), b.goal()); near(a.goal(), c.goal());
     });
     test("free wheel speed and lookahead are bounded and finish without hidden debt", [] {
         pinch::WheelMotion w; w.add(32767, 1, 100, 20, 100, 16, 400);

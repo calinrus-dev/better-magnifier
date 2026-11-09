@@ -12,9 +12,9 @@ Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantall
 
 ## Comportamiento
 
-- **Win+rueda** amplía o reduce de forma continua. Cada muesca aplica un cambio proporcional (20 % por defecto); una rueda de alta resolución conserva los deltas pequeños. Las ráfagas suman recorrido y cambiar de sentido cancela el impulso anterior. La rueda sin esa combinación conserva su función normal.
+- **Win+rueda** amplía o reduce de forma continua. Cada muesca aplica un cambio proporcional (35 % por defecto); una rueda de alta resolución conserva los deltas pequeños. Las ráfagas suman recorrido y cambiar de sentido cancela el impulso anterior. La rueda sin esa combinación conserva su función normal.
 
-- **Win+clic central** vuelve rápidamente al 100 %. **Ctrl+Alt+rueda** selecciona la ventana anterior al girar hacia arriba y la siguiente al girar hacia abajo, sin desplegar un selector. Acumula deltas de alta resolución y limita la cadencia para una rueda libre.
+- **Win+clic central** vuelve rápidamente al 100 %. **Ctrl+Alt+rueda** selecciona la ventana anterior al girar hacia arriba y la siguiente al girar hacia abajo, sin desplegar un selector. Conserva cada muesca de una ráfaga, confirma la ventana activada antes de avanzar y descarta el recorrido pendiente al invertir. La cola está limitada a seis pasos y 200 ms para una rueda libre.
 - **Ctrl+Alt+clic central** maximiza/restaura y **Ctrl+Alt+clic derecho** minimiza la ventana actual únicamente si activas **Extra Ctrl+Alt mouse window actions**. Esas acciones adicionales están desactivadas por defecto.
 - **Win+«+»/«−»**, también en el numérico: el primer toque mantiene el paso nativo; tras 200 ms, la pulsación mantenida pasa a una trayectoria continua cuya velocidad aumenta gradualmente. Al soltar fija el nivel y la posición visibles, sin completar un objetivo lejano. Invertir el sentido parte del nivel visible.
 - Distingue el pellizco del movimiento de los tres dedos juntos. Los gestos de dos y cuatro dedos conservan su comportamiento.
@@ -38,7 +38,7 @@ En la pestaña **Ajustes** del mod:
 - **Ctrl+Alt + mouse wheel switches windows:** activado por defecto en el perfil Win.
 - **Extra Ctrl+Alt mouse window actions:** desactivado por defecto.
 - **Disable Magnifier click-to-read and its reading cursor:** activado por defecto en el binario verificado. Evita nuevas activaciones de Ctrl+Alt+clic izquierdo y de su cursor de lectura. No desactiva Narrador ni otros atajos de lectura de la Lupa. Si el modo de lectura ya estaba activo al cambiar el ajuste, sal de él o vuelve a abrir la Lupa.
-- **Wheel zoom per notch:** 20 % por defecto, ajustable entre 1 y 100 %.
+- **Wheel zoom per notch:** 35 % por defecto, ajustable entre 1 y 100 %.
 - **Wheel transition time:** 100 ms por defecto, ajustable entre 40 y 250 ms.
 - **Maximum wheel zoom growth per second:** 400 % de crecimiento por segundo por defecto (hasta multiplicar por cinco en un segundo). Limita los giros extremos de una rueda libre; el recorrido pendiente se acota y caduca tras una pausa.
 - **Suppress Magnifier startup feedback cursor:** activado por defecto. Pide a Windows que omita el indicador azul al abrir la Lupa desde el mod; es una petición opcional que no impide abrirla si Windows la rechaza.
@@ -69,7 +69,7 @@ El mod es local; no necesita publicarse en el catálogo de Windhawk. Al actualiz
 
 Después de compilar también puedes ejecutar `scripts/install-local.ps1` en PowerShell **como administrador**. Está limitado a la instalación estándar de Windhawk y a `local@kde-pinch-zoom`. Conserva los ajustes existentes y añade los nuevos valores predeterminados. Por la integración solicitada, desactiva únicamente el antiguo `magnifier-headless`, conservándolo instalado. Cierra la Lupa de la sesión actual, restaura el 100 % e instala una DLL con nombre basado en su hash. Ante un fallo recupera la configuración previa. No modifica las claves de gestos del touchpad ni otros mods.
 
-`-Disable` desactiva este mod. `-WheelStep 20` actualiza explícitamente la sensibilidad de una instalación existente; sus otros ajustes se conservan. `-Acceleration 35 -MaximumZoom 0` permite cambiar esos dos ajustes explícitamente. El resultado queda en `build/install-result.json`. El instalador comprueba `build/build-info.json` para evitar instalar una DLL que no corresponda al código.
+`-Disable` desactiva este mod. `-WheelStep 35` actualiza explícitamente la sensibilidad de una instalación existente; sus otros ajustes se conservan. `-Acceleration 35 -MaximumZoom 0` permite cambiar esos dos ajustes explícitamente. El resultado queda en `build/install-result.json`. El instalador comprueba `build/build-info.json` para evitar instalar una DLL que no corresponda al código.
 
 ### Inicio de Windows
 
@@ -104,7 +104,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 
 Para Windhawk portátil añade `-WindhawkPath 'D:\Herramientas\Windhawk'`. Se generan la DLL, el host de diagnóstico y las pruebas en `build/`. El script no instala ni activa mods, no inicia Windhawk y no cambia el zoom.
 
-La compilación ejecuta **609 comprobaciones** del reconocedor, perfiles de ratón, runtime/ABI, adaptador nativo, filtro del shell, lanzamiento y teclado progresivo con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
+La compilación ejecuta **629 comprobaciones** del reconocedor, perfiles de ratón, runtime/ABI, adaptador nativo, filtro del shell, lanzamiento y teclado progresivo con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
 
 ```powershell
 .\build\native-integration.exe --live

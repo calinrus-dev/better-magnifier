@@ -4,13 +4,14 @@ Fecha de revisión: 9 de noviembre de 2026.
 
 ## Estado de 0.7.0
 
-- **609 comprobaciones automáticas correctas**: 75 núcleo, 61 helpers de ratón, 83 runtime/ABI, 49 callbacks reales del broker con APIs falsas, 110 adaptador nativo, 25 shell, 14 lanzamiento y 192 teclado progresivo. Compilación completa x64 con `-Wall -Wextra -Werror`; prueba Live compilada, sin ejecutar.
+- **629 comprobaciones automáticas correctas**: 77 núcleo, 59 helpers de ratón, 103 runtime/ABI, 49 callbacks reales del broker con APIs falsas, 110 adaptador nativo, 25 shell, 14 lanzamiento y 192 teclado progresivo. Compilación completa x64 con `-Wall -Wextra -Werror`; prueba Live compilada, sin ejecutar.
 - Instalada localmente y comparada por SHA-256 con el manifiesto: fuente y DLL coinciden; versión 0.7.0 habilitada. Gate/Native/UI de pantalla completa y hooks de ratón/lectura verificados READY, nativeCaps=0x7f, gateCaps=0x7, resolutores offline y lastError=0. El diagnóstico registró eventos de rueda físicos tras instalar; esto no sustituye la confirmación del usuario.
-- Muestra pasiva de 5,04 segundos, sin estímulos sintéticos: ambos Explorer 0,00 % de un núcleo; Magnify 0,31 %. Conjuntos de trabajo: 620,1/155,3 MiB en Explorer y 194,1 MiB en Magnify. Memoria privada estable en Explorer y −0,06 MiB en Magnify; handles 0/0/+2. Son procesos completos: no aíslan el coste del mod, no miden GPU/latencia física ni demuestran ausencia de fugas.
+- Muestra pasiva de la revisión final, 5,05 segundos, sin estímulos sintéticos: Explorer principal 0,62 % de un núcleo, segundo Explorer 0,00 %, Magnify 0,00 %. Conjuntos de trabajo: 639,3/154,6/193,8 MiB. Memoria privada y handles sin variación en los tres procesos. Son procesos completos: no aíslan el coste del mod, no miden GPU/latencia física ni demuestran ausencia de fugas.
 
 - Refactor del contrato de inicio: una UI de pantalla completa validada al 100 % puede recibir el primer objetivo; el renderer se exige después del setter inicial. Objetivos finos comunes a pinch, wheel y teclado IPC; un fallo de primado no recibe ACK ni genera reintentos infinitos.
 - Escritorio independiente de Task View; instantánea preservada hasta publicar la restauración, incluso cuando la señal del shell se retira antes. Una trayectoria nueva de rueda no invalida su propia revisión al recuperar la vista.
 - Teclado progresivo probado con reloj y renderizador falsos: primer toque nativo, retraso inicial, velocidad logarítmica creciente, límites, frame detenido, suelta visible, objetivos adelantados e inversión directa. El número de aserciones incluye comprobaciones por frame, no escenarios de hardware independientes.
+- Ciclado de ventanas: dos muescas agregadas producen dos cambios sin otra entrada; A→B→C→A y reversa mantienen el orden aunque cambie el MRU. Confirmación asíncrona del foco, rechazo/timeout sin avanzar el ciclo, cola de hasta seis pasos que caducan en 200 ms y descarte al invertir. Se filtran menús, desplegables y tooltips. APIs de activación falsas, sin navegar por aplicaciones reales.
 - Perfil Win de ratón: estado físico L/R, Win+S/espacio/zoom pasantes, una máscara por pulsación consumida, fallo reintentable, deltas fraccionarios, cambio de ventanas limitado, deuda caducada e inversión, y propiedad DOWN/UP conservada al soltar modificadores.
 - Primer pellizco frío limitado a un 3 %, entrega desde timer sin exigir nuevo movimiento HID y cancelación al soltar, cerrar, cambiar de entrada/dispositivo/sesión o caducar.
 - Rueda de arranque con PID falso del proceso de test (sin abrir Magnify); caducidad, cancelación y ausencia de replay antiguo. Backend no compatible conserva los controles nativos; no se usa una transformación propia como reemplazo.
@@ -18,7 +19,9 @@ Fecha de revisión: 9 de noviembre de 2026.
 - Callbacks reales del broker ejercitados con endpoints Win32 falsos: sin hooks instalados ni SendInput/PostMessage reales, incluyendo falla parcial de máscara, DOWN duplicado, teclas/capacidades que cambian y recuperación tras perder UP durante bloqueo.
 - La integración visible se compiló, pero no se ejecutó. Las pruebas automáticas no generan teclas, clics ni oscilaciones sobre el escritorio.
 
-Pendiente: comprobación física del nuevo perfil Win, mantener/soltar OEM y numérico, primer arranque, UAC/aplicaciones elevadas, DPI mixtos, otros equipos y reinicio completo de Windows. No se confunden los resultados de la base 0.6.0 con validación de 0.7.
+El usuario valoró positivamente el pellizco y el funcionamiento general de la primera revisión 0.7. Señaló ganancia insuficiente de rueda y pérdidas en el ciclo de ventanas; la revisión final usa 35 % y confirmación de foco.
+
+Pendiente: confirmación física de esta última afinación de rueda/ciclo, mantener/soltar OEM y numérico, primer arranque, UAC/aplicaciones elevadas, DPI mixtos, otros equipos y reinicio completo de Windows. No se confunden los resultados de la base 0.6.0 con validación de 0.7.
 
 ## Estado de 0.6.1
 
