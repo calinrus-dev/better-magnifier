@@ -2,7 +2,7 @@
 
 Fecha de revisión: 9 de noviembre de 2026.
 
-## Estado de 0.7.1
+## Estado de 0.7.5
 
 - Regresión de 0.7.0 observada en el equipo: el PID compartido correspondía a una instancia de Magnify terminada con código 0, mientras otra instancia seguía viva con `MagUIClass`, el fullscreen y el endpoint propio del mod. Los atajos nativos seguían actualizando contadores, pero el host consideraba desconectado el backend. Reasignar únicamente el PID al dueño validado devolvió READY sin simular teclas ni cambiar el zoom. Esta recuperación temporal no se presenta como arreglo permanente.
 - El usuario confirmó que Inicio aparecía al soltar Win después de usar la rueda. El hook ahora conserva la marca de ratón consumido y enmascara la liberación antes de `CallNextHookEx`, incluida la repetición de Win y pares L/R. Las pruebas usan endpoints falsos; `keybd_event` no devuelve confirmación de éxito, así que el contador de liberación registra intentos.

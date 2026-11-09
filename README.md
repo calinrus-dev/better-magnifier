@@ -4,7 +4,7 @@
 
 Un proyecto de **accesibilidad para Windows**, inspirado en el efecto de zoom de **KWin / KDE Plasma**. Permite ampliar todo el escritorio con un **pellizco de tres dedos**, usando el motor de la Lupa de Windows. Abre los dedos para acercar y ciérralos para alejar. Puedes alternarlo con **Win + «+» / «−»**, también en el teclado numérico.
 
-**0.7.1 experimental.** Perfil predeterminado: **Win+rueda** para ampliar, **Win+clic central** para volver al 100 % y **Ctrl+Alt+rueda** para recorrer ventanas. El teclado mantenido acelera de forma continua y se detiene en el nivel visible al soltar. Se revisan el arranque al 100 %, el escritorio y la alternancia de entradas. La 0.7.1 corrige la pérdida del controlador al abrir una instancia temporal de la Lupa y el menú Inicio al soltar Win tras usar el ratón. La validación física se registra por separado en `docs/VALIDATION.md`.
+**0.7.5 experimental.** Perfil predeterminado: **Win+rueda** para ampliar, **Win+clic central** para volver al 100 % y **Ctrl+Alt+rueda** para recorrer ventanas. El teclado mantenido acelera de forma continua y se detiene en el nivel visible al soltar. Se revisan el arranque al 100 %, el escritorio y la alternancia de entradas. La 0.7.5 corrige la pérdida del controlador al abrir una instancia temporal de la Lupa y el menú Inicio al soltar Win tras usar el ratón. La validación física se registra por separado en `docs/VALIDATION.md`.
 
 Las funciones avanzadas están validadas en Windows 11 x64, compilación **26200**, con Windhawk **1.7.3**. Una versión o interfaz no verificada conserva los controles estándar de la Lupa; no implica soporte del zoom continuo. El mod conserva la configuración de gestos del touchpad.
 
@@ -41,7 +41,7 @@ En la pestaña **Ajustes** del mod:
 - **Wheel zoom per notch:** 35 % por defecto, ajustable entre 1 y 100 %.
 - **Wheel transition time:** 100 ms por defecto, ajustable entre 40 y 250 ms.
 - **Maximum normal wheel zoom growth per second:** 400 % de crecimiento por segundo por defecto (hasta multiplicar por cinco en un segundo), para movimientos normales y de precisión.
-- **Maximum free-spin wheel zoom growth per second:** 700 % por defecto (hasta multiplicar por ocho en un segundo) para ráfagas rápidas, con transición y recorrido pendiente de 40 ms. Usa el mayor de este límite y el normal; `0` desactiva la adaptación. Se detecta por unidades de rueda, no por número de eventos: subdividir una muesca en deltas pequeños no aumenta su ganancia.
+- **Maximum free-spinning wheel zoom growth per second:** 700 % por defecto (hasta multiplicar por ocho en un segundo) para ráfagas rápidas, con transición y recorrido pendiente de 40 ms. Usa el mayor de este límite y el normal; `0` desactiva la adaptación. Se detecta por unidades de rueda, no por número de eventos: subdividir una muesca en deltas pequeños no aumenta su ganancia. Este tiempo corresponde a la trayectoria del mod, no a una garantía de latencia física de Windows o de la pantalla.
 - **Suppress Magnifier startup feedback cursor:** activado por defecto. Pide a Windows que omita el indicador azul al abrir la Lupa desde el mod; es una petición opcional que no impide abrirla si Windows la rechaza.
 
 - **Zoom sensitivity:** 100 % por defecto, seguimiento proporcional a la separación.
@@ -61,6 +61,8 @@ El seguimiento del ratón, el teclado, el texto y Narrador se configura en la Lu
 
 ## Instalación
 
+Descargas de esta versión: [Better Magnifier 0.7.5](https://github.com/calinrus-dev/better-magnifier/releases/tag/v0.7.5). Incluye el archivo de Windhawk, el código fuente, un paquete x64 compilado y `SHA256SUMS.txt` para comprobar las descargas.
+
 1. Descarga [`mods/kde-pinch-zoom.wh.cpp`](mods/kde-pinch-zoom.wh.cpp).
 2. En Windhawk, usa **Crear un nuevo Mod**, sustituye el ejemplo por el archivo completo y compila.
 3. Actívalo. Se carga en `explorer.exe` y `magnify.exe`. La primera resolución de símbolos puede tardar.
@@ -69,6 +71,8 @@ El seguimiento del ratón, el teclado, el texto y Narrador se configura en la Lu
 El mod es local; no necesita publicarse en el catálogo de Windhawk. Al actualizar, sustituye el archivo completo para incluir los dos procesos de destino.
 
 Después de compilar también puedes ejecutar `scripts/install-local.ps1` en PowerShell **como administrador**. Está limitado a la instalación estándar de Windhawk y a `local@kde-pinch-zoom`. Conserva los ajustes existentes y añade los nuevos valores predeterminados. Por la integración solicitada, desactiva únicamente el antiguo `magnifier-headless`, conservándolo instalado. Cierra la Lupa de la sesión actual, restaura el 100 % e instala una DLL con nombre basado en su hash. Ante un fallo recupera la configuración previa. No modifica las claves de gestos del touchpad ni otros mods.
+
+Con el paquete `better-magnifier-0.7.5-windows-x64.zip`, extráelo completo y ejecuta ese script desde su carpeta en una consola de administrador; los binarios ya están compilados. Conserva las carpetas `build`, `mods` y `scripts` juntas. Para actualizar desde una versión anterior, usa el mismo mod local: el identificador sigue siendo `local@kde-pinch-zoom`, aunque el nombre visible sea Better Magnifier. Las revisiones intermedias 0.7.1–0.7.4 no se publicaron como releases.
 
 `-Disable` desactiva este mod. `-WheelStep 35` actualiza explícitamente la sensibilidad de una instalación existente; sus otros ajustes se conservan. `-Acceleration 35 -MaximumZoom 0` permite cambiar esos dos ajustes explícitamente. El resultado queda en `build/install-result.json`. El instalador comprueba `build/build-info.json` para evitar instalar una DLL que no corresponda al código.
 

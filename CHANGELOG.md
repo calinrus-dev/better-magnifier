@@ -1,6 +1,8 @@
 # Cambios
 
-## 0.7.1 — 2026-11-09 (experimental)
+## 0.7.5 — 2026-11-09 (experimental)
+
+Publicación que reúne las correcciones posteriores a 0.7.0. Las versiones intermedias no se publicaron como releases.
 
 - Corrección de la desconexión al abrir instancias temporales de Magnify: metadatos nativos aislados hasta autenticar la UI real, lease por proceso y limpieza condicionada al dueño. Los relays no sustituyen el PID del renderer ni vacían el estado compartido al terminar.
 - La máscara de Inicio se aplica también antes de reenviar Win-UP cuando esa pulsación se usó con el ratón. Resiste la repetición de Win y pares izquierdo/derecho. La tecla Win sola y los atajos de teclado siguen pasando sin sintetizar modificadores.
