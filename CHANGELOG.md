@@ -1,5 +1,16 @@
 # Cambios
 
+## 0.7.0 — 2026-11-09 (experimental)
+
+- Perfil Win+rueda para zoom, Win+clic central al 100 % y Ctrl+Alt+rueda para recorrer ventanas. Perfil anterior Ctrl+Alt configurable. Acciones extra de maximizar/restaurar/minimizar opcionales, desactivadas por defecto.
+- Hilo dedicado para hooks breves, resincronización tras bloqueo y ruta sin sondeos de teclas para movimientos normales del ratón; teclado observado siempre pasante. Máscara neutral una vez por pulsación Win consumida; no se sintetizan modificadores. DOWN/UP emparejados aunque se suelte el modificador primero.
+- Teclado mantenido progresivo tras 200 ms, sin multiplicar saltos nativos. Factor continuo, reloj acotado y detención en el nivel/posición visibles; inversión sin arrastrar objetivos adelantados.
+- UI al 100 % lista para el primer zoom sin exigir un renderer preexistente. Primado fino común a pellizco, rueda y solicitudes de teclado; modos lente/acoplado conservan controles nativos.
+- El escritorio ya no se confunde con Task View. La multitarea suspende/restaura el zoom global; una entrada nueva explícita prevalece conservando la trayectoria y descartando revisiones antiguas.
+- Primer pellizco en frío limitado a un 3 % y a que el mismo gesto siga activo; intención de rueda de arranque limitada a una muesca y 1,5 s; cancelación por reset, nuevo gesto, sesión y comandos nativos. Giro libre sin colas diferidas.
+- Supresión reversible y opcional de «leer desde aquí» y su cursor especial, ligada a la identidad exacta del Magnify verificado. Los clics ordinarios y Narrador no se interceptan.
+- Tests renovados y revisión independiente de tres agentes. Las comprobaciones de hardware y las limitaciones se detallan en `docs/VALIDATION.md`.
+
 ## 0.6.1 — 2026-11-08 (experimental)
 
 - Mantener Win+«+»/«−» aplica ×2 a las repeticiones, configurable de 1 a 4, incluidos OEM y teclado numérico. El primer toque, los botones de la Lupa y la repetición global del teclado conservan su comportamiento.

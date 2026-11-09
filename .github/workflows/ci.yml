@@ -38,8 +38,10 @@ jobs:
             build/build-info.json
             build/kde-pinch-zoom.dll
             build/pinch-zoom-host.exe
+            build/mouse-shortcut-tests.exe
             build/core-tests.exe
             build/runtime-tests.exe
+            build/broker-tests.exe
             build/native-adapter-tests.exe
             build/native-gate-tests.exe
             build/launch-feedback-tests.exe

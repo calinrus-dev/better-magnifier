@@ -1,10 +1,10 @@
 # Better Magnifier
 
-*An experimental accessibility mod for Windhawk: smooth pinch and Ctrl+Alt+mouse-wheel zoom, inspired by KWin and powered by Windows Magnifier.*
+*An experimental accessibility mod for Windhawk: smooth pinch, keyboard and Win+mouse-wheel zoom, inspired by KWin and powered by Windows Magnifier.*
 
 Un proyecto de **accesibilidad para Windows**, inspirado en el efecto de zoom de **KWin / KDE Plasma**. Permite ampliar todo el escritorio con un **pellizco de tres dedos**, usando el motor de la Lupa de Windows. Abre los dedos para acercar y ciérralos para alejar. Puedes alternarlo con **Win + «+» / «−»**, también en el teclado numérico.
 
-**0.6.1 experimental.** Mantener Win+«+»/«−» acelera las repeticiones (×2 por defecto), también en el teclado numérico, y al soltar fija la vista renderizada. El toque corto conserva su paso nativo. La base 0.6.0 fue confirmada por el usuario; la nueva pulsación mantenida está pendiente de confirmación física.
+**0.7.0 experimental.** Perfil predeterminado: **Win+rueda** para ampliar, **Win+clic central** para volver al 100 % y **Ctrl+Alt+rueda** para recorrer ventanas. El teclado mantenido acelera de forma continua y se detiene en el nivel visible al soltar. Se revisan el arranque al 100 %, el escritorio y la alternancia de entradas. La confirmación física de este perfil nuevo se registra por separado en `docs/VALIDATION.md`.
 
 Las funciones avanzadas están validadas en Windows 11 x64, compilación **26200**, con Windhawk **1.7.3**. Una versión o interfaz no verificada conserva los controles estándar de la Lupa; no implica soporte del zoom continuo. El mod conserva la configuración de gestos del touchpad.
 
@@ -12,25 +12,32 @@ Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantall
 
 ## Comportamiento
 
-- **Ctrl+Alt+rueda** amplía o reduce de forma continua. Cada muesca aplica un cambio proporcional (20 % por defecto); una rueda de alta resolución conserva los deltas pequeños. Las ráfagas suman recorrido y cambiar de sentido cancela el impulso anterior. La rueda sin esa combinación conserva su función normal.
+- **Win+rueda** amplía o reduce de forma continua. Cada muesca aplica un cambio proporcional (20 % por defecto); una rueda de alta resolución conserva los deltas pequeños. Las ráfagas suman recorrido y cambiar de sentido cancela el impulso anterior. La rueda sin esa combinación conserva su función normal.
 
+- **Win+clic central** vuelve rápidamente al 100 %. **Ctrl+Alt+rueda** selecciona la ventana anterior al girar hacia arriba y la siguiente al girar hacia abajo, sin desplegar un selector. Acumula deltas de alta resolución y limita la cadencia para una rueda libre.
+- **Ctrl+Alt+clic central** maximiza/restaura y **Ctrl+Alt+clic derecho** minimiza la ventana actual únicamente si activas **Extra Ctrl+Alt mouse window actions**. Esas acciones adicionales están desactivadas por defecto.
+- **Win+«+»/«−»**, también en el numérico: el primer toque mantiene el paso nativo; tras 200 ms, la pulsación mantenida pasa a una trayectoria continua cuya velocidad aumenta gradualmente. Al soltar fija el nivel y la posición visibles, sin completar un objetivo lejano. Invertir el sentido parte del nivel visible.
 - Distingue el pellizco del movimiento de los tres dedos juntos. Los gestos de dos y cuatro dedos conservan su comportamiento.
 - Un deslizamiento horizontal de tres dedos cambia directamente de ventana, una por gesto, sin navegar por un selector: izquierda siguiente, derecha anterior. Es configurable. Filtra ventanas ocultas, auxiliares y cloaked, y conserva una secuencia para que los gestos sucesivos recorran más de dos ventanas.
 - Arriba/abajo conservan la acción de Windows. El inicio nativo mantiene su momento original cuando la información de contactos está disponible; un pellizco confirmado después cancela la acción provisional una sola vez.
 - El zoom es global: cambiar de ventana mantiene el nivel. **No hay perfiles de zoom por ventana.**
-- Task View y Mostrar escritorio se ven al 100 %. Al salir se restaura el nivel y la posición global anteriores. Las dos vistas pueden solaparse sin sobrescribir la instantánea. La opción se puede desactivar.
+- Task View se ve al 100 %. Al salir recupera el nivel y la posición global anteriores. Una entrada nueva y explícita de zoom recupera ese nivel y continúa desde él. **El escritorio sigue siendo ampliable**, incluso después de Win+D. La opción se puede desactivar.
 - La interfaz nativa activa y cierra la ampliación; durante el pellizco, el controlador de pantalla completa recibe factores decimales continuos. Cada solicitud realiza una sola actualización y se descartan las basadas en un nivel anterior al teclado. Windows conserva las animaciones, los atajos y el seguimiento del ratón y del foco. El mod no bloquea las actualizaciones del motor nativo ni sustituye los atajos por una transformación propia.
 - El seguimiento del puntero y del foco lo controla Windows. Para mantener la vista en el ratón, usa **Configuración > Accesibilidad > Lupa > Vista**: activa el seguimiento del puntero y elige mantenerlo centrado. Si no quieres que el teclado, el texto o Narrador desplacen la vista, ajusta sus casillas de seguimiento. El mod conserva esos ajustes nativos.
 - La aceleración depende de la velocidad de separación de los dedos. Los movimientos lentos mantienen precisión; los rápidos reciben una ganancia adicional moderada. Los tiempos HID evitan confundir paquetes acumulados con un gesto rápido.
 - La ventana, la entrada en la barra de tareas y los controles táctiles de la Lupa se ocultan por defecto. Se pueden mostrar desactivando **Hide Windows Magnifier window and touch controls**. La Lupa sigue ejecutándose como motor del zoom.
-- **Win+Esc** conserva el cierre de Windows. El mod no vuelve a abrir la Lupa por su temporizador; un nuevo pellizco puede iniciarla otra vez. El arranque en frío necesita abrir `Magnify.exe`: se descarta el movimiento recibido durante esa espera para evitar un salto al activarse.
+- **Win+Esc** conserva el cierre de Windows. El mod no vuelve a abrir la Lupa por su temporizador; un nuevo pellizco puede iniciarla otra vez. El arranque en frío necesita abrir `Magnify.exe`. La rueda conserva como máximo una muesca durante 1,5 segundos; un reset, otro gesto o un cambio de sesión la descartan. No se reproduce una cola de giro libre al terminar de cargar. El pellizco conserva como máximo un primer aumento del 3 % durante 1,5 segundos, sólo mientras sigan los tres dedos en ese gesto; el resto del recorrido de espera se descarta.
 - No hay un límite propio de 400 %. Con `Maximum zoom = 0` se usa el rango nativo de esta Lupa, **100–1600 %**. Su motor tiene ese límite; el máximo teórico de la API independiente no amplía el rango del motor nativo.
 
 ## Ajustes
 
 En la pestaña **Ajustes** del mod:
 
-- **Smooth Ctrl+Alt+mouse wheel zoom:** activado por defecto. Desactivarlo conserva el zoom por rueda de Windows.
+- **Use Win + mouse wheel for zoom:** activado por defecto. Desactívalo para recuperar el perfil **Ctrl+Alt+rueda** y **Ctrl+Alt+clic central**; el cambio de ventanas con la rueda deja de interceptarse en ese perfil.
+- **Smooth mouse wheel zoom:** activado por defecto. Desactiva el zoom continuo por rueda; los atajos de teclado nativos permanecen disponibles.
+- **Ctrl+Alt + mouse wheel switches windows:** activado por defecto en el perfil Win.
+- **Extra Ctrl+Alt mouse window actions:** desactivado por defecto.
+- **Disable Magnifier click-to-read and its reading cursor:** activado por defecto en el binario verificado. Evita nuevas activaciones de Ctrl+Alt+clic izquierdo y de su cursor de lectura. No desactiva Narrador ni otros atajos de lectura de la Lupa. Si el modo de lectura ya estaba activo al cambiar el ajuste, sal de él o vuelve a abrir la Lupa.
 - **Wheel zoom per notch:** 20 % por defecto, ajustable entre 1 y 100 %.
 - **Wheel transition time:** 100 ms por defecto, ajustable entre 40 y 250 ms.
 - **Maximum wheel zoom growth per second:** 400 % de crecimiento por segundo por defecto (hasta multiplicar por cinco en un segundo). Limita los giros extremos de una rueda libre; el recorrido pendiente se acota y caduca tras una pausa.
@@ -41,15 +48,15 @@ En la pestaña **Ajustes** del mod:
 - **Reverse pinch direction:** invierte acercar y alejar.
 - **Pinch activation threshold:** 3 % por defecto.
 - **Maximum zoom:** 0 por defecto, sin un tope adicional al de Windows.
-- **Keyboard hold speed multiplier:** 2 por defecto, ajustable entre 1 y 4. El valor 1 conserva la repetición estándar. Solo modifica repeticiones de Win+«+»/«−»; mantiene el primer paso y la cadencia del teclado configurada en Windows. Al soltar detiene el objetivo pendiente en la vista renderizada, en el siguiente turno del hilo UI.
+- **Progressive keyboard hold speed:** 2 por defecto, entre 1 y 4. El valor 1 mantiene las repeticiones estándar; 2–4 regula la velocidad máxima de la rampa continua. La suelta se detecta en el siguiente turno UI, normalmente un fotograma.
 - **Keyboard zoom increment:** 0 mantiene el paso configurado en Windows. Un valor positivo lo personaliza.
 - **Switch windows directly with a horizontal three-finger swipe:** activado por defecto; desactívalo para conservar el selector lateral de Windows.
-- **Show Task View and desktop at 100 percent:** activado por defecto; conserva una única instantánea global para restaurarla al salir.
+- **Show Task View at 100 percent:** activado por defecto; conserva una única instantánea global para restaurarla al salir.
 - **Keep the pointer stationary during a pinch:** activado por defecto. Omite los reajustes sintéticos del cursor que hace la Lupa durante el pellizco, también al mantener los dedos. No bloquea el movimiento real del ratón ni los atajos nativos.
 - **Hide Windows Magnifier window and touch controls:** activado por defecto.
 - **Observe only:** reconoce sin aplicar zoom.
 
-El seguimiento del ratón, el teclado, el texto y Narrador se configura en la Lupa de Windows. Durante Task View o Mostrar escritorio el zoom se suspende temporalmente. Un comando explícito de teclado recupera la vista anterior y tiene prioridad sobre esa suspensión, incluso si aún estaba pendiente. **Native Windows Magnifier integration** permite combinar pellizco, rueda y atajos. Al desactivarla se conserva el comportamiento estándar de Windows.
+El seguimiento del ratón, el teclado, el texto y Narrador se configura en la Lupa de Windows. Durante Task View el zoom se suspende temporalmente. Una entrada explícita nueva de teclado, rueda o pellizco recupera la vista anterior y tiene prioridad sobre esa suspensión. El escritorio no se suspende. **Native Windows Magnifier integration** permite combinar pellizco, rueda y atajos. Al desactivarla se conserva el comportamiento estándar de Windows.
 
 ## Instalación
 
@@ -68,9 +75,9 @@ Después de compilar también puedes ejecutar `scripts/install-local.ps1` en Pow
 
 El mod se carga en Explorer mediante Windhawk. Mantén Windhawk habilitado al inicio; en la instalación estándar su servicio debe estar en inicio automático. No hace falta abrir la interfaz del mod en cada sesión. Al arrancar se prepara la Lupa oculta al 100 %. Una carga temprana de Explorer solicita el componente del shell desde System32 si todavía no estaba cargado.
 
-Win+Esc cierra la Lupa y no se reabre por un temporizador. Un pellizco nuevo o Ctrl+Alt+rueda puede abrirla otra vez. Si estaba cerrada, la primera entrada de rueda la despierta; el movimiento recibido antes de estar lista se descarta para evitar saltos al terminar de cargar símbolos. Sigue girando la rueda cuando esté preparada. La primera resolución de símbolos puede tardar.
+Win+Esc cierra la Lupa y no se reabre por un temporizador. Un pellizco nuevo, Win+rueda o Win+«+» puede abrirla de nuevo. La rueda conserva una intención pequeña y acotada durante el arranque; el primer aumento desde una UI lista al 100 % no espera a que exista un renderer ampliado. La primera resolución de símbolos puede tardar.
 
-Bloqueo, suspensión y desconexión invalidan la entrada pendiente. Al reanudar se comprueba que la sesión esté activa y desbloqueada. Los intentos de apertura tienen un intervalo mínimo y un límite; una entrada física nueva permite recuperarse de un fallo temporal. El instalador conserva el identificador `local@kde-pinch-zoom` y el archivo de fuente para actualizar las instalaciones anteriores de Better Magnifier.
+Bloqueo, suspensión y desconexión invalidan la entrada pendiente. Al volver, el observador resincroniza las teclas físicas para evitar estados antiguos de Win+L. Al reanudar se comprueba que la sesión esté activa y desbloqueada. Los intentos de apertura tienen un intervalo mínimo y un límite; una entrada física nueva permite recuperarse de un fallo temporal. El instalador conserva el identificador `local@kde-pinch-zoom` y el archivo de fuente para actualizar las instalaciones anteriores de Better Magnifier.
 
 ## Recuperación y diagnóstico
 
@@ -97,7 +104,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 
 Para Windhawk portátil añade `-WindhawkPath 'D:\Herramientas\Windhawk'`. Se generan la DLL, el host de diagnóstico y las pruebas en `build/`. El script no instala ni activa mods, no inicia Windhawk y no cambia el zoom.
 
-La compilación ejecuta 75 pruebas del núcleo, 53 del runtime/ABI, 68 del adaptador nativo, 25 del filtro del shell, 14 del lanzamiento público y 42 del teclado mantenido: 277 comprobaciones con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
+La compilación ejecuta **609 comprobaciones** del reconocedor, perfiles de ratón, runtime/ABI, adaptador nativo, filtro del shell, lanzamiento y teclado progresivo con backend simulado, sin modificar el escritorio. También compila una prueba de integración que **solo se ejecuta explícitamente**, con el mod instalado:
 
 ```powershell
 .\build\native-integration.exe --live
@@ -119,11 +126,11 @@ La opción `-Exercise` ejecuta una prueba **visible** que acerca y aleja repetid
 
 ## Compatibilidad y validación
 
-Se requiere un Precision Touchpad que exponga sus contactos mediante HID y la Lupa en pantalla completa. Los modos lente y acoplado no están soportados. Faltan pruebas físicas con varios monitores, DPI mixtos, suspensión y aplicaciones elevadas. No funciona en el escritorio protegido de UAC.
+Se requiere un Precision Touchpad que exponga sus contactos mediante HID y la Lupa en pantalla completa. Los modos lente y acoplado no están soportados. Faltan pruebas físicas con varios monitores, DPI mixtos, suspensión y aplicaciones elevadas. No funciona en el escritorio protegido de UAC. El perfil Win usa un observador de teclado que siempre deja pasar los eventos y una pareja neutra VK_E8 para evitar que se abra Inicio al soltar Win; no sintetiza Win, Ctrl ni Alt. Windows puede rechazar esa máscara ante una aplicación elevada por UIPI: entonces el evento se deja pasar. El perfil Ctrl+Alt es la alternativa configurable. [SendInput/UIPI](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput), [patrón de máscara de menú](https://github.com/AutoHotkey/AutoHotkeyDocs/blob/v2/docs/lib/A_MenuMaskKey.htm).
 
 La versión 0.1 presentaba conflictos con la multitarea. El usuario confirmó mejoría en 0.2 y, durante la corrección de 0.3, confirmó que podía alternar pellizco y teclado numérico. Eso no certifica todas las combinaciones de hardware o gestos. Consulta [`docs/VALIDATION.md`](docs/VALIDATION.md) para separar pruebas automáticas, comprobaciones locales y aspectos pendientes.
 
-El código distribuible es un único archivo autocontenido. El lector HID y el filtro de gestos viven en Explorer; el auxiliar de Magnify actualiza el objetivo de zoom sobre el controlador de pantalla completa de Windows. Si falta el filtro nativo, no se aplica zoom. El protocolo compartido no almacena coordenadas de los dedos.
+El código distribuible es un único archivo autocontenido. El lector HID y el filtro de gestos viven en Explorer; el auxiliar de Magnify actualiza el objetivo de zoom sobre el controlador de pantalla completa de Windows. Si falta el filtro nativo, se desactiva el pellizco; la rueda conserva su capacidad independiente cuando el núcleo está disponible. El protocolo compartido no almacena coordenadas de los dedos.
 
 Cambios en [CHANGELOG.md](CHANGELOG.md). Puedes abrir issues o enviar mejoras siguiendo [CONTRIBUTING.md](CONTRIBUTING.md).
 

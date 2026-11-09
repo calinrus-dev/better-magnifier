@@ -40,6 +40,10 @@ $sourceText = Get-Content -LiteralPath $source -Raw -Encoding UTF8
 $id = [regex]::Match($sourceText, '(?m)^// @id\s+(\S+)').Groups[1].Value
 $version = [regex]::Match($sourceText, '(?m)^// @version\s+(\S+)').Groups[1].Value
 if ($id -ne 'kde-pinch-zoom' -or -not $version) { throw 'Metadatos del mod invalidos.' }
+$mouseTest = Join-Path $buildPath 'mouse-shortcut-tests.exe'
+Invoke-Compile 'mouse-shortcut-tests' ($common + @((Join-Path $projectRoot 'tests\mouse_shortcut_tests.cpp'), '-o', $mouseTest))
+& $mouseTest
+if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas de perfiles de raton ($LASTEXITCODE)." }
 $testExe = Join-Path $buildPath 'core-tests.exe'
 Invoke-Compile 'core-tests' ($common + @((Join-Path $projectRoot 'tests\core_tests.cpp'), '-o', $testExe))
 & $testExe
@@ -56,6 +60,10 @@ Invoke-Compile 'runtime-tests' ($common + @('-municode', (Join-Path $projectRoot
     '-o', $runtimeTest) + $links)
 & $runtimeTest (Join-Path $buildPath 'kde-pinch-zoom.dll')
 if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas de runtime/ABI ($LASTEXITCODE)." }
+$brokerTest = Join-Path $buildPath 'broker-tests.exe'
+Invoke-Compile 'broker-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\broker_tests.cpp'), '-o', $brokerTest) + $links)
+& $brokerTest
+if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas del broker de raton/teclado ($LASTEXITCODE)." }
 $adapterTest = Join-Path $buildPath 'native-adapter-tests.exe'
 Invoke-Compile 'native-adapter-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_adapter_tests.cpp'),
     '-o', $adapterTest) + $links)

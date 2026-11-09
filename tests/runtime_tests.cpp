@@ -12,7 +12,8 @@ POINT cursor{200, 150};
 BOOL WINAPI readView(float* level, int* x, int* y) {
     *level = static_cast<float>(simulated.zoom); *x = simulated.x; *y = simulated.y; return TRUE;
 }
-BOOL WINAPI writeView(float level, int x, int y) { simulated = {level, x, y}; return TRUE; }
+unsigned transformWrites = 0;
+BOOL WINAPI writeView(float level, int x, int y) { ++transformWrites; simulated = {level, x, y}; return TRUE; }
 BOOL WINAPI readCursor(POINT* point) { *point = cursor; return TRUE; }
 bool queryFails = false;
 LONG queryFlags = WTS_SESSIONSTATE_UNLOCK;
@@ -36,6 +37,10 @@ struct HostTestAccess {
         host.querySession_ = querySession; host.freeSession_ = freeSession;
         host.zoom_.useTestBackend(readView, writeView, readCursor);
     }
+    static void nativeBackend(Host& host, bridge::Record& record) {
+        host.zoom_.useTestBackend(readView, writeView, readCursor, true);
+        host.zoom_.useTestNativeRecord(&record);
+    }
     static void input(Host& host, int delta, LONG epoch, ULONGLONG now) { host.wheelInput(delta, epoch, now); }
     static void tick(Host& host, ULONGLONG now) { host.render(now); }
     static void cancel(Host& host) { host.cancelWheel(); }
@@ -44,7 +49,47 @@ struct HostTestAccess {
     static void resume(Host& host, ULONGLONG now) { host.activity_.resume(); host.applySessionState(); host.refreshSession(now, true); }
     static void refresh(Host& host, ULONGLONG now) { host.refreshSession(now); }
     static bool sessionActive(Host& host) { return host.sessionActive_; }
+    static void frame(Host& host, HANDLE id, const std::vector<pinch::Contact>& contacts, ULONGLONG now) {
+        auto& device = host.devices_[id]; device.valid = true;
+        host.frame(id, device, contacts, now, 16);
+    }
+    static bool seedPending(Host& host, HANDLE id) { return host.devices_[id].coldPinchSeed.has_value(); }
+    static void activeDevice(Host& host, HANDLE id) { host.activeDevice_ = id; }
+    static void restart(Host& host) { host.restartGestureTracking(); }
+    static void lock(Host& host) { host.activity_.lock(); host.applySessionState(); }
 };
+}
+namespace {
+// One fake host fixture keeps UI readiness, protocol flags and a live process
+// coherent. Every transform remains in simulated; no host window is created.
+struct HostFixture {
+    bridge::Record record{};
+    runtime::Host host{pinch::Config{}};
+    explicit HostFixture(LONG revision, pinch::View initial = {2, 0, 0}) {
+        simulated = initial; cursor = {200, 150};
+        record.magnifierPid = static_cast<LONG>(GetCurrentProcessId());
+        record.magnifierReady = 1;
+        record.nativeCaps = compatibility::NativeCore | compatibility::NativeWheel;
+        record.enabled = 1; record.controlEnabled = 1; record.inputRevision = revision;
+        record.nativeLevel = static_cast<LONG>(std::lround(initial.zoom * 10000));
+        runtime::HostTestAccess::prepare(host, record);
+    }
+};
+}
+namespace {
+const HANDLE pinchDevice = reinterpret_cast<HANDLE>(0x11);
+std::vector<pinch::Contact> pinchContacts(double scale) {
+    return {{1, {50 - 15 * scale, 30}}, {2, {50, 30}}, {3, {50 + 15 * scale, 30}}};
+}
+void prepareColdPinch(HostFixture& fixture) {
+    fixture.record.magnifierReady = 0;
+    fixture.record.gateReady = 1; fixture.record.shellPid = static_cast<LONG>(GetCurrentProcessId());
+    runtime::HostTestAccess::nativeBackend(fixture.host, fixture.record);
+}
+void beginColdPinch(HostFixture& fixture) {
+    runtime::HostTestAccess::frame(fixture.host, pinchDevice, pinchContacts(1), 1000);
+    runtime::HostTestAccess::frame(fixture.host, pinchDevice, pinchContacts(1.1), 1016);
+}
 }
 int wmain(int argc, wchar_t** argv) {
     int checks = 0;
@@ -101,18 +146,15 @@ int wmain(int argc, wchar_t** argv) {
         require(zoom.resetToNormal() && simulated.zoom == 1, "emergency reset works even after external changes");
     }
     {
-        bridge::Record record{};
-        record.magnifierPid = static_cast<LONG>(GetCurrentProcessId()); record.magnifierReady = 1;
-        record.enabled = 1; record.controlEnabled = 1; record.inputRevision = 4;
-        runtime::Host host(pinch::Config{});
-        simulated = {2, 0, 0};
-        runtime::HostTestAccess::prepare(host, record);
+        HostFixture fixture(4);
+        auto& record = fixture.record; auto& host = fixture.host;
         runtime::HostTestAccess::input(host, 120, 4, 100);
         require(runtime::HostTestAccess::active(host) && record.wheelActive,
                 "real host starts a wheel trajectory from a current revision");
+        const double wheelGoal = runtime::HostTestAccess::goal(host);
         runtime::HostTestAccess::tick(host, 116);
         runtime::HostTestAccess::tick(host, 132);
-        require(simulated.zoom > 2 && simulated.zoom < 2.3, "real host renders decimal wheel frames through its zoom controller");
+        require(simulated.zoom > 2 && simulated.zoom < wheelGoal, "real host renders decimal wheel frames through its zoom controller");
         runtime::HostTestAccess::cancel(host);
         const LONG cancelledEpoch = record.inputRevision;
         runtime::HostTestAccess::input(host, 120, 4, 140);
@@ -120,7 +162,7 @@ int wmain(int argc, wchar_t** argv) {
                 "a wheel message queued before pinch or reset cannot restart cancelled motion");
         record.shellMask = 1;
         runtime::HostTestAccess::input(host, 120, cancelledEpoch, 150);
-        require(!runtime::HostTestAccess::active(host), "Task View refuses queued wheel input");
+        require(runtime::HostTestAccess::active(host), "a fresh wheel request remains available while Task View is displayed");
         record.shellMask = 0;
         runtime::HostTestAccess::input(host, 120, record.inputRevision, 160);
         InterlockedIncrement(&record.inputRevision);
@@ -139,16 +181,14 @@ int wmain(int argc, wchar_t** argv) {
         runtime::HostTestAccess::input(host, 120, -1, 186);
         require(!runtime::HostTestAccess::active(host), "a queued wake-only event cannot zoom after READY arrives");
         runtime::HostTestAccess::input(host, -120, record.inputRevision, 190);
-        runtime::HostTestAccess::tick(host, 300);
-        runtime::HostTestAccess::tick(host, 316);
-        runtime::HostTestAccess::tick(host, 348);
-        runtime::HostTestAccess::tick(host, 380);
+        for (ULONGLONG now = 206; now <= 1000 && runtime::HostTestAccess::active(host); now += 16)
+            runtime::HostTestAccess::tick(host, now);
         require(!runtime::HostTestAccess::active(host) && !record.wheelActive,
                 "host wheel trajectory stops once its endpoint is delivered");
     }
     {
-        bridge::Record record{}; runtime::Host host(pinch::Config{});
-        runtime::HostTestAccess::prepare(host, record);
+        HostFixture fixture(0);
+        auto& host = fixture.host;
         queryFails = true;
         runtime::HostTestAccess::resume(host, 1000);
         require(!runtime::HostTestAccess::sessionActive(host), "resume query failure preserves an inactive session");
@@ -207,11 +247,8 @@ int wmain(int argc, wchar_t** argv) {
         require(!binary_profiles::identify(module), "truncated CodeView records cannot be read outside the image");
     }
     {
-        bridge::Record record{};
-        record.magnifierPid = static_cast<LONG>(GetCurrentProcessId()); record.magnifierReady = 1;
-        record.enabled = 1; record.controlEnabled = 1; record.inputRevision = 70;
-        runtime::Host host(pinch::Config{}); simulated = {2, 0, 0};
-        runtime::HostTestAccess::prepare(host, record);
+        HostFixture fixture(70);
+        auto& record = fixture.record; auto& host = fixture.host;
         for (int i=0; i<10000; ++i) bridge::enqueueWheel(&record, 1, 70, 1000);
         require(!runtime::HostTestAccess::active(host), "producer cannot render before the host consumes its bounded mailbox");
         runtime::HostTestAccess::tick(host, 1000);
@@ -231,19 +268,16 @@ int wmain(int argc, wchar_t** argv) {
                 "input older than two hundred milliseconds cannot replay after a stall");
         bridge::enqueueWheel(&record, 120, record.inputRevision, 1320);
         record.shellMask = 1; runtime::HostTestAccess::tick(host, 1320);
-        require(!runtime::HostTestAccess::active(host) && !record.wheelPacket, "overview drops pending wheel input without retaining it");
+        require(runtime::HostTestAccess::active(host) && !record.wheelPacket, "fresh wheel input in Task View uses the bounded mailbox instead of being discarded");
         record.shellMask = 0;
         bridge::enqueueWheel(&record, 120, record.inputRevision, 1340);
         InterlockedIncrement(&record.inputRevision); runtime::HostTestAccess::tick(host, 1340);
         require(!runtime::HostTestAccess::active(host), "a keyboard revision rejects an old producer packet");
     }
     {
-        bridge::Record record{};
-        record.magnifierPid = static_cast<LONG>(GetCurrentProcessId()); record.magnifierReady = 1;
-        record.nativeCaps = compatibility::NativeCore | compatibility::NativeWheel;
-        record.gateCaps = 0; record.gateReady = 0; record.inputRevision = 90;
-        runtime::Host host(pinch::Config{}); simulated = {2, 0, 0};
-        runtime::HostTestAccess::prepare(host, record);
+        HostFixture fixture(90);
+        auto& record = fixture.record; auto& host = fixture.host;
+        record.gateCaps = 0; record.gateReady = 0;
         bridge::enqueueWheel(&record, 120, 90, 1000);
         runtime::HostTestAccess::tick(host, 1000); runtime::HostTestAccess::tick(host, 1016); runtime::HostTestAccess::tick(host, 1032);
         require(runtime::HostTestAccess::active(host) && simulated.zoom > 2 && !record.gateReady,
@@ -258,6 +292,7 @@ int wmain(int argc, wchar_t** argv) {
     {
         bridge::Record record{};
         record.magnifierPid = static_cast<LONG>(GetCurrentProcessId()); record.magnifierReady = 1; record.nativeLevel = 30000;
+        record.nativeCaps = compatibility::NativeCore;
         runtime::Zoom zoom; simulated = {3, 0, 0};
         zoom.useTestBackend(readView, writeView, readCursor, true); zoom.useTestNativeRecord(&record);
         require(zoom.current() == 3, "test starts with a working native backend");
@@ -266,13 +301,210 @@ int wmain(int argc, wchar_t** argv) {
                 "backend loss or pause cannot write a public replacement transform over native Windows zoom");
     }
     {
-        bridge::Record record{};
-        record.magnifierPid = static_cast<LONG>(GetCurrentProcessId()); record.magnifierReady = 1; record.inputRevision = 123;
-        runtime::Host host(pinch::Config{}); simulated = {2, 0, 0}; runtime::HostTestAccess::prepare(host, record);
+        HostFixture fixture(123);
+        auto& record = fixture.record; auto& host = fixture.host;
         bridge::enqueueWheel(&record, 1, 123, 1001);
         runtime::HostTestAccess::tick(host, 1000);
         require(runtime::HostTestAccess::active(host) && !record.wheelPacket,
                 "a fresh producer timestamp one millisecond after the sampled frame is not discarded");
+    }
+    {
+        HostFixture fixture(160);
+        auto& record = fixture.record; auto& host = fixture.host;
+        record.shellMask = 2; // Showing desktop is telemetry, not Task View.
+        runtime::HostTestAccess::input(host, 120, 160, 1000);
+        runtime::HostTestAccess::tick(host, 1016); runtime::HostTestAccess::tick(host, 1032);
+        require(runtime::HostTestAccess::active(host) && simulated.zoom > 2,
+                "showing desktop keeps smooth wheel zoom available");
+        record.shellMask = 3;
+        InterlockedIncrement(&record.inputRevision); // Entering Task View invalidates motion captured before its native suspension.
+        runtime::HostTestAccess::tick(host, 1048);
+        require(!runtime::HostTestAccess::active(host) && !record.wheelActive,
+                "entering Task View invalidates the previous wheel trajectory through its native epoch");
+        runtime::HostTestAccess::input(host, 120, record.inputRevision, 1064);
+        require(runtime::HostTestAccess::active(host), "explicit fresh wheel input can take over after Task View suspended the old trajectory");
+    }
+    {
+        bridge::Record record{};
+        record.magnifierPid = static_cast<LONG>(GetCurrentProcessId());
+        record.magnifierReady = 1; record.nativeCaps = compatibility::NativeCore | compatibility::NativeWheel;
+        record.nativeLevel = 10000; record.zoomRevision = 17;
+        runtime::Zoom zoom; simulated = {1, 0, 0};
+        zoom.useTestBackend(readView, writeView, readCursor, true); zoom.useTestNativeRecord(&record);
+        const unsigned writesBefore = transformWrites;
+        zoom.tick(0, 0);
+        require(zoom.target(1.0005, true, bridge::InputSource::Wheel) && record.requestedLevel == 10005 && record.requestSource == static_cast<LONG>(bridge::InputSource::Wheel),
+                "UI readiness at one hundred percent can enqueue the first fine wheel request before a renderer exists");
+        const LONG wheelSequence = record.requestedSequence;
+        require(zoom.target(1.25, true) && record.requestedSequence != wheelSequence && record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch),
+                "switching from wheel to pinch updates the native source instead of retaining the old wheel tag");
+        require(zoom.resetToNormal() && record.pendingCommand == 3 && transformWrites == writesBefore && simulated.zoom == 1,
+                "reset with a ready native UI stays on IPC and never writes a replacement fullscreen transform");
+        record.magnifierReady = 0; record.nativeCaps = 0; record.resolverReasonNative = ERROR_NOT_SUPPORTED;
+        const LONG unsupportedSequence = record.requestedSequence;
+        require(!zoom.target(2, true) && !zoom.resetToNormal() && record.requestedSequence == unsupportedSequence && transformWrites == writesBefore,
+                "unsupported native core neither enqueues private updates nor falls back to a second magnifier");
+    }
+    {
+        bridge::Record record{};
+        record.magnifierPid = static_cast<LONG>(GetCurrentProcessId());
+        record.magnifierReady = 1; record.nativeCaps = compatibility::NativeCore;
+        record.nativeLevel = 10000; record.overviewSavedLevel = 30000; record.shellMask = 1;
+        runtime::Zoom zoom; simulated = {1, 0, 0};
+        zoom.useTestBackend(readView, writeView, readCursor, true); zoom.useTestNativeRecord(&record);
+        const unsigned writesBefore = transformWrites;
+        require(zoom.current() == 3,
+                "a pinch starting in Task View adopts the saved global zoom rather than its temporary one hundred percent display");
+        record.shellMask = 0;
+        require(zoom.current() == 3, "a dismiss signal cannot expose the temporary baseline before the UI restores its saved level");
+        record.shellMask = 1;
+        zoom.tick(0, 0);
+        require(zoom.target(3.1, true, bridge::InputSource::Pinch) && record.requestedLevel == 31000 &&
+                record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch) && transformWrites == writesBefore,
+                "an explicit Task View pinch requests its delta from the saved level through the unified native source");
+        record.overviewSavedLevel = 0; record.nativeLevel = 31000; record.shellMask = 0;
+        require(zoom.current() == 3.1, "leaving Task View returns the published global level without a stale saved baseline");
+    }
+    {
+        HostFixture fixture(180, {1, 0, 0});
+        auto& record = fixture.record; auto& host = fixture.host;
+        record.shellMask = 1; record.nativeLevel = 10000; record.overviewSavedLevel = 30000;
+        runtime::HostTestAccess::nativeBackend(host, record);
+        const unsigned writesBefore = transformWrites;
+        runtime::HostTestAccess::input(host, 120, 180, 1000);
+        runtime::HostTestAccess::tick(host, 1016); runtime::HostTestAccess::tick(host, 1032);
+        require(runtime::HostTestAccess::active(host) && record.requestedLevel > 30000 &&
+                record.requestSource == static_cast<LONG>(bridge::InputSource::Wheel) && transformWrites == writesBefore,
+                "fresh Task View wheel math starts from the saved native level and enqueues its typed source without a public transform");
+    }
+    {
+        HostFixture fixture(200);
+        auto& record = fixture.record; auto& host = fixture.host;
+        record.magnifierReady = 0; // This test process stays alive, so no real Magnifier launch is attempted.
+        runtime::HostTestAccess::input(host, 120, 200, 1000);
+        require(!runtime::HostTestAccess::active(host), "cold wheel input waits for the native UI instead of using a public replacement magnifier");
+        record.magnifierReady = 1;
+        runtime::HostTestAccess::tick(host, 1016);
+        require(runtime::HostTestAccess::active(host) && runtime::HostTestAccess::goal(host) > 2,
+                "a bounded first wheel notch is delivered once the native UI becomes ready");
+    }
+    {
+        HostFixture fixture(210);
+        auto& record = fixture.record; auto& host = fixture.host;
+        record.magnifierReady = 0;
+        runtime::HostTestAccess::input(host, 120, 210, 1000);
+        runtime::HostTestAccess::input(host, 1, 210, 3000); // No host frame ran while the old intent expired.
+        record.magnifierReady = 1;
+        runtime::HostTestAccess::tick(host, 3016);
+        require(runtime::HostTestAccess::active(host) && runtime::HostTestAccess::goal(host) > 2 && runtime::HostTestAccess::goal(host) < 2.01,
+                "fresh fine input after a cold-start stall cannot revive an expired full notch");
+    }
+    {
+        HostFixture fixture(220);
+        auto& record = fixture.record; auto& host = fixture.host;
+        record.magnifierReady = 0;
+        runtime::HostTestAccess::input(host, 120, 220, 1000);
+        runtime::HostTestAccess::cancel(host); // A pinch, reset or session transition takes priority.
+        record.magnifierReady = 1;
+        runtime::HostTestAccess::tick(host, 1016);
+        require(!runtime::HostTestAccess::active(host) && !record.wheelActive,
+                "a cancelled cold wheel intent cannot reappear when the native UI becomes ready");
+    }
+    {
+        HostFixture fixture(190, {1, 0, 0}); prepareColdPinch(fixture);
+        auto& record = fixture.record; auto& host = fixture.host;
+        const unsigned writesBefore = transformWrites;
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1), 1000);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.02), 1016);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.04), 1032);
+        require(runtime::HostTestAccess::seedPending(host, pinchDevice) && record.requestedSequence == 0,
+                "a first cold pinch stores one intent without writing to an unavailable native backend");
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.08), 1048);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.12), 1064);
+        record.magnifierReady = 1; runtime::HostTestAccess::tick(host, 1100);
+        const LONG seed = record.requestedLevel;
+        require(record.requestedSequence == 1 && record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch) &&
+                std::abs(seed / 10000.0 - 1.04 / 1.02) < 0.0001 && !runtime::HostTestAccess::seedPending(host, pinchDevice) &&
+                transformWrites == writesBefore,
+                "READY timer delivers only the first precise cold intent even when fingers stay still after unrendered travel");
+        runtime::HostTestAccess::tick(host, 1110);
+        require(record.requestedSequence == 1, "an idle timer cannot resend the cold pinch seed");
+        record.nativeLevel = seed; record.appliedSequence = record.requestedSequence; InterlockedIncrement(&record.zoomRevision);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.13), 1116);
+        require(record.requestedLevel > seed && record.requestedLevel < seed * 1.03,
+                "the next live HID delta adopts the seed and does not replay the waiting gesture's total spread");
+    }
+    {
+        HostFixture fixture(191, {1, 0, 0}); prepareColdPinch(fixture); beginColdPinch(fixture);
+        fixture.record.magnifierReady = 1; runtime::HostTestAccess::tick(fixture.host, 1100);
+        require(fixture.record.requestedLevel == 10300 && fixture.record.requestedSequence == 1,
+                "a large first cold pinch is bounded to three percent rather than replayed at full travel");
+    }
+    {
+        HostFixture fixture(192, {2, 0, 0}); prepareColdPinch(fixture);
+        runtime::HostTestAccess::frame(fixture.host, pinchDevice, pinchContacts(1), 1000);
+        runtime::HostTestAccess::frame(fixture.host, pinchDevice, pinchContacts(0.9), 1016);
+        fixture.record.magnifierReady = 1; runtime::HostTestAccess::tick(fixture.host, 1100);
+        require(std::abs(fixture.record.requestedLevel / 10000.0 - 2 / 1.03) < 0.0001,
+                "a contracting cold pinch retains its direction and the same multiplicative precision bound");
+    }
+    {
+        HostFixture fixture(193, {1, 0, 0}); prepareColdPinch(fixture); beginColdPinch(fixture);
+        runtime::HostTestAccess::frame(fixture.host, pinchDevice, {}, 1032);
+        fixture.record.magnifierReady = 1; runtime::HostTestAccess::tick(fixture.host, 1100);
+        require(!runtime::HostTestAccess::seedPending(fixture.host, pinchDevice) && fixture.record.requestedSequence == 0,
+                "lifting the fingers before READY clears the cold intent without zooming later");
+    }
+    {
+        HostFixture fixture(194, {1, 0, 0}); prepareColdPinch(fixture); beginColdPinch(fixture);
+        runtime::HostTestAccess::cancel(fixture.host);
+        fixture.record.magnifierReady = 1; runtime::HostTestAccess::tick(fixture.host, 1100);
+        require(!runtime::HostTestAccess::seedPending(fixture.host, pinchDevice) && fixture.record.requestedSequence == 0,
+                "a reset or another input that invalidates wheel ownership also clears pending pinch intent");
+    }
+    {
+        HostFixture fixture(195, {1, 0, 0}); prepareColdPinch(fixture); beginColdPinch(fixture);
+        runtime::HostTestAccess::restart(fixture.host);
+        fixture.record.magnifierReady = 1;
+        runtime::HostTestAccess::frame(fixture.host, pinchDevice, pinchContacts(1.1), 1100);
+        runtime::HostTestAccess::tick(fixture.host, 1116);
+        require(!runtime::HostTestAccess::seedPending(fixture.host, pinchDevice) && fixture.record.requestedSequence == 0,
+                "an exit/reset waits for a genuine finger release and cannot resurrect a cold pinch after Win Esc");
+    }
+    {
+        HostFixture fixture(196, {1, 0, 0}); prepareColdPinch(fixture); beginColdPinch(fixture);
+        InterlockedIncrement(&fixture.record.nativeCommands); fixture.record.magnifierReady = 1;
+        runtime::HostTestAccess::tick(fixture.host, 1100);
+        require(!runtime::HostTestAccess::seedPending(fixture.host, pinchDevice) && fixture.record.requestedSequence == 0,
+                "a newer native keyboard command wins over a cold pinch intent");
+    }
+    {
+        HostFixture fixture(197, {1, 0, 0}); prepareColdPinch(fixture); beginColdPinch(fixture);
+        fixture.record.magnifierReady = 1; runtime::HostTestAccess::tick(fixture.host, 2517);
+        require(!runtime::HostTestAccess::seedPending(fixture.host, pinchDevice) && fixture.record.requestedSequence == 0,
+                "cold pinch intent expires after fifteen hundred milliseconds");
+    }
+    {
+        HostFixture fixture(198, {1, 0, 0}); prepareColdPinch(fixture); beginColdPinch(fixture);
+        runtime::HostTestAccess::activeDevice(fixture.host, reinterpret_cast<HANDLE>(0x22));
+        fixture.record.magnifierReady = 1; runtime::HostTestAccess::tick(fixture.host, 1100);
+        require(!runtime::HostTestAccess::seedPending(fixture.host, pinchDevice) && fixture.record.requestedSequence == 0,
+                "a cold intent cannot migrate from its original active device to a different touchpad");
+    }
+    {
+        HostFixture fixture(199, {1, 0, 0}); prepareColdPinch(fixture); beginColdPinch(fixture);
+        runtime::HostTestAccess::lock(fixture.host);
+        fixture.record.magnifierReady = 1; runtime::HostTestAccess::tick(fixture.host, 1100);
+        require(!runtime::HostTestAccess::seedPending(fixture.host, pinchDevice) && fixture.record.requestedSequence == 0,
+                "locking the session cancels cold pinch intent before any native view can appear");
+    }
+    {
+        HostFixture fixture(200, {1, 0, 0}); prepareColdPinch(fixture); beginColdPinch(fixture);
+        fixture.record.nativeViewMode = 3; runtime::HostTestAccess::tick(fixture.host, 1050);
+        fixture.record.nativeViewMode = 2; fixture.record.magnifierReady = 1;
+        runtime::HostTestAccess::tick(fixture.host, 1100);
+        require(!runtime::HostTestAccess::seedPending(fixture.host, pinchDevice) && fixture.record.requestedSequence == 0,
+                "a lens-mode transition cannot carry an old cold intent into a later fullscreen view");
     }
     if (argc != 2) {
         std::cerr << "Usage: runtime-tests path-to-mod.dll\n";
