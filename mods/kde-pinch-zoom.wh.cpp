@@ -22,7 +22,7 @@
 
 // ==WindhawkModReadme==
 /*
-# Better Magnifier â€” experimental
+# Better Magnifier - experimental
 
 Spread three fingers to magnify the desktop; pinch them together to zoom out.
 Win+mouse wheel provides proportional smooth zoom; Win+middle click resets.
