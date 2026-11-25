@@ -76,6 +76,8 @@ struct HostTestAccess {
     }
     static void input(Host& host, int delta, LONG epoch, ULONGLONG now) { host.wheelInput(delta, epoch, now); }
     static void tick(Host& host, ULONGLONG now) { host.render(now); }
+    static void toggleZoom(Host& host, ULONGLONG now) { host.toggleZoomMode(now); }
+    static DWORD disarmZoom(Host& host) { host.disarmZoomMode(); return host.disarmedAt_; }
     static void windows(Host& host, WindowSwitcher& backend) { host.windowSwitcher_ = &backend; }
     static int windowPending(Host& host, ULONGLONG now) { return host.windowWheel_.pending(now); }
     static void cancel(Host& host) { host.cancelWheel(); }
@@ -136,6 +138,54 @@ int wmain(int argc, wchar_t** argv) {
         }
         ++checks;
     };
+    {
+        HostFixture fixture(1, {1, 0, 0});
+        auto& record = fixture.record;
+        auto& host = fixture.host;
+        runtime::HostTestAccess::nativeBackend(host, record);
+        runtime::HostTestAccess::toggleZoom(host, 100);
+        require(record.zoomModeActive && record.requestedLevel == 15000 && record.requestedSequence,
+                "the primary mouse chord opens at 150 percent when no previous zoom exists");
+        record.nativeLevel = 17500;
+        runtime::HostTestAccess::tick(host, 116);
+        runtime::HostTestAccess::toggleZoom(host, 132);
+        require(!record.zoomModeActive && record.pendingCommand == 3,
+                "the same primary mouse chord deactivates immediately and requests normal zoom");
+        const LONG sequence = record.requestedSequence;
+        runtime::HostTestAccess::toggleZoom(host, 148);
+        require(!record.zoomModeActive && record.requestedSequence == sequence,
+                "a rapid re-enable waits for the in-flight reset rather than overwriting it");
+        record.pendingCommand = 0; record.nativeLevel = 10000;
+        runtime::HostTestAccess::tick(host, 164);
+        require(record.zoomModeActive && record.requestedLevel == 17500 && record.requestedSequence != sequence,
+                "a completed reset allows the pending toggle to restore the last visible level");
+        runtime::HostTestAccess::tick(host, 180);
+        require(record.zoomModeActive, "at normal zoom its active mode remains available for the next wheel direction");
+        record.magnifierReady = 0;
+        runtime::HostTestAccess::tick(host, 196);
+        require(!record.zoomModeActive, "disappearing native availability clears the active mode");
+    }
+    {
+        HostFixture fixture(10);
+        auto& record = fixture.record;
+        auto& host = fixture.host;
+        runtime::HostTestAccess::tick(host, 100);
+        require(record.zoomModeActive, "a native non-unit zoom uses the same mode as the mouse chord");
+        const auto disarmed = runtime::HostTestAccess::disarmZoom(host);
+        InterlockedIncrement(&record.nativeCommands);
+        record.nativeZoomInputTime = static_cast<LONG>(disarmed - 1);
+        runtime::HostTestAccess::tick(host, 116);
+        require(!record.zoomModeActive, "asynchronous and stale key activity cannot undo deactivation");
+        record.nativeZoomInputTime = static_cast<LONG>(disarmed + 1);
+        record.pendingCommand = 3;
+        runtime::HostTestAccess::tick(host, 132);
+        require(!record.zoomModeActive, "even a fresh key cannot publish a mode in front of a pending reset");
+        record.pendingCommand = 0;
+        runtime::HostTestAccess::tick(host, 148);
+        require(record.zoomModeActive, "a verified newer plus request re-enters the mode at non-unit zoom");
+        runtime::HostTestAccess::lock(host);
+        require(!record.zoomModeActive, "the session lock clears public zoom mode immediately");
+    }
     HIDP_VALUE_CAPS caps{};
     caps.LogicalMin = -32768;
     caps.LogicalMax = 32767;

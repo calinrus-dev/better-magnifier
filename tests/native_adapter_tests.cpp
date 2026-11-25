@@ -77,6 +77,25 @@ int wmain() {
         if (!valid) { std::cerr << "FAIL " << name << '\n'; std::exit(1); }
         ++checks;
     };
+    {
+        const auto edges = runtime::ZoomBorder::edges(RECT{-1600, -200, 0, 700});
+        constexpr std::array<RECT, 4> expected{{
+            {-1600, -200, 0, -198}, {-1600, 698, 0, 700},
+            {-1600, -198, -1598, 698}, {-2, -198, 0, 698}}};
+        require(EqualRect(&edges[0], &expected[0]), "top border uses two physical pixels");
+        require(EqualRect(&edges[1], &expected[1]), "bottom border spans to both corners");
+        require(EqualRect(&edges[2], &expected[2]), "left edge avoids overlapping top and bottom");
+        require(EqualRect(&edges[3], &expected[3]), "right edge supports negative monitor coordinates");
+        bridge::Record border{};
+        border.controlEnabled = 1; border.magnifierReady = 1;
+        border.heartbeat = 2000; border.hostWindow = 1;
+        require(!magnifier::wantsZoomBorder(border, 2000), "inactive mode has no border");
+        border.zoomModeActive = 1;
+        require(magnifier::wantsZoomBorder(border, 2000), "active mode shows the border regardless of zoom level");
+        require(!magnifier::wantsZoomBorder(border, 2251), "expired host heartbeat removes the border");
+        border.magnifierReady = 0;
+        require(!magnifier::wantsZoomBorder(border, 2000), "unavailable native magnifier removes the border");
+    }
     magnifier::mapping.useTestRecord(&state);
     magnifier::messageWindow.store(reinterpret_cast<HWND>(0x5678));
     magnifier::keyboardKillTimer = [](HWND, UINT_PTR) -> BOOL { return TRUE; };

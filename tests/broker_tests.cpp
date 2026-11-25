@@ -23,6 +23,12 @@ void WINAPI keyEvent(BYTE key, BYTE scan, DWORD flags, ULONG_PTR tag) {
     releaseMasks.push_back({key, scan, flags, tag, passed});
 }
 bool postSuccess = true;
+bool timerAvailable = true;
+unsigned timers = 0, cancelledTimers = 0;
+UINT_PTR WINAPI setTimer(HWND, UINT_PTR, UINT, TIMERPROC) {
+    return timerAvailable ? ++timers : 0;
+}
+BOOL WINAPI killTimer(HWND, UINT_PTR) { ++cancelledTimers; return TRUE; }
 SHORT WINAPI keyState(int key) { ++keyReads; return key >= 0 && key < 256 && keys[static_cast<unsigned>(key)] ? static_cast<SHORT>(0x8000) : 0; }
 UINT WINAPI sendInput(UINT count, LPINPUT input, int size) {
     if (size != sizeof(INPUT)) return 0;
@@ -46,8 +52,11 @@ struct InputBrokerTestAccess {
         MouseInputBroker::apiKeyEvent = keyEvent;
         MouseInputBroker::apiPost = post;
         MouseInputBroker::apiNext = next;
+        MouseInputBroker::apiSetTimer = setTimer;
+        MouseInputBroker::apiKillTimer = killTimer;
     }
     static void flushResync(MouseInputBroker& broker) { broker.consumeResync(); }
+    static void expireChord(MouseInputBroker& broker) { broker.replayButton(); }
     static void detach(MouseInputBroker& broker) { if (MouseInputBroker::owner_ == &broker) MouseInputBroker::owner_ = nullptr; }
     static LRESULT key(unsigned vk, bool down, bool injected = false, int code = HC_ACTION) {
         KBDLLHOOKSTRUCT event{}; event.vkCode = vk;
@@ -57,10 +66,13 @@ struct InputBrokerTestAccess {
         if (code == HC_ACTION && vk < keys.size()) keys[vk] = down;
         return result;
     }
-    static LRESULT mouse(UINT message, int delta = 0, bool injected = false, int code = HC_ACTION) {
+    static LRESULT mouse(UINT message, int delta = 0, bool injected = false, int code = HC_ACTION,
+                         DWORD time = 100, POINT point = {}) {
         MSLLHOOKSTRUCT event{};
         event.mouseData = static_cast<DWORD>(static_cast<std::uint16_t>(delta)) << 16;
         event.flags = injected ? LLMHF_INJECTED : 0;
+        event.time = time;
+        event.pt = point;
         return MouseInputBroker::mouse(code, message, reinterpret_cast<LPARAM>(&event));
     }
 };
@@ -73,6 +85,7 @@ struct BrokerFixture {
     pinch::Config config;
     BrokerFixture() {
         keys.fill(false); releaseMasks.clear(); sends.clear(); sendResults.clear(); nextSendResult = 0; posts.clear(); passed = 0; postSuccess = true;
+        timerAvailable = true; timers = cancelledTimers = 0;
         record.nativeCaps = compatibility::NativeCore | compatibility::NativeWheel;
         record.magnifierReady = 1; record.nativeViewMode = 2;
         record.hostWindow = 0x1234; record.controlEnabled = 1; record.wheelEnabled = 1; record.inputRevision = 17;
@@ -84,6 +97,9 @@ struct BrokerFixture {
     void configure(bool interactive = true) { broker.configure(config, interactive); }
     LRESULT key(unsigned vk, bool down, bool injected = false) { return runtime::InputBrokerTestAccess::key(vk, down, injected); }
     LRESULT mouse(UINT message, int delta = 0, bool injected = false) { return runtime::InputBrokerTestAccess::mouse(message, delta, injected); }
+    LRESULT pointer(UINT message, DWORD time, POINT point = {}) {
+        return runtime::InputBrokerTestAccess::mouse(message, 0, false, HC_ACTION, time, point);
+    }
     void ctrlAlt() { key(VK_CONTROL, true); key(VK_MENU, true); }
     int wheel() const { return pinch::wheelDelta(static_cast<std::uint64_t>(record.wheelPacket)); }
     int windows() const { return pinch::wheelDelta(static_cast<std::uint64_t>(record.windowWheelPacket)); }
@@ -232,9 +248,87 @@ int wmain() {
     }
     {
         BrokerFixture f;
-        require(f.mouse(WM_MOUSEMOVE) == kPassed && f.mouse(WM_LBUTTONDOWN) == kPassed &&
-                f.mouse(WM_LBUTTONUP) == kPassed && f.mouse(WM_MOUSEHWHEEL, 120) == kPassed && keyReads == 0,
+        require(f.mouse(WM_MOUSEMOVE) == kPassed && f.mouse(WM_XBUTTONDOWN) == kPassed &&
+                f.mouse(WM_XBUTTONUP) == kPassed && f.mouse(WM_MOUSEHWHEEL, 120) == kPassed && keyReads == 0,
                 "ordinary mouse movement and unbound buttons take the fast path without querying modifier state");
+    }
+    for (const bool leftFirst : {false, true}) {
+        BrokerFixture f;
+        const UINT first = leftFirst ? WM_LBUTTONDOWN : WM_RBUTTONDOWN;
+        const UINT last = leftFirst ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
+        const UINT releaseFirst = leftFirst ? WM_LBUTTONUP : WM_RBUTTONUP;
+        const UINT releaseLast = leftFirst ? WM_RBUTTONUP : WM_LBUTTONUP;
+        require(f.pointer(first, 100) == 1 && f.pointer(last, 130) == 1 && posts.size() == 1 &&
+                posts[0].w == runtime::kToggleZoomAction && sends.empty() && cancelledTimers == 1,
+                "a physical left-right pair toggles once in either order without replay or middle click");
+        require(f.pointer(releaseFirst, 140) == 1 && f.pointer(first, 141) == 1 &&
+                f.pointer(releaseLast, 150) == 1 && f.pointer(releaseFirst, 151) == 1 && posts.size() == 1,
+                "a chord owns both ups and ignores pressed-again edges until both buttons are up");
+        require(f.mouse(WM_MBUTTONDOWN) == kPassed && f.mouse(WM_MBUTTONUP) == kPassed,
+                "a physical middle click still goes to Windows");
+    }
+    for (const bool left : {false, true}) {
+        BrokerFixture f;
+        const UINT down = left ? WM_LBUTTONDOWN : WM_RBUTTONDOWN;
+        const UINT up = left ? WM_LBUTTONUP : WM_RBUTTONUP;
+        const DWORD downFlag = left ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_RIGHTDOWN;
+        const DWORD upFlag = left ? MOUSEEVENTF_LEFTUP : MOUSEEVENTF_RIGHTUP;
+        require(f.pointer(down, 100) == 1 && f.pointer(up, 115) == 1 && sends.size() == 1 &&
+                sends[0].inputs.size() == 2 && sends[0].inputs[0].type == INPUT_MOUSE &&
+                sends[0].inputs[0].mi.dwFlags == downFlag && sends[0].inputs[1].mi.dwFlags == upFlag && posts.empty(),
+                "a quick single click replays exactly its own down and up");
+        f.pointer(down, 200);
+        require(f.pointer(WM_MOUSEMOVE, 201, {5, 0}) == kPassed && sends.size() == 2 &&
+                sends[1].inputs.size() == 1 && sends[1].inputs[0].mi.dwFlags == downFlag &&
+                f.pointer(up, 230) == kPassed && posts.empty(), "movement releases one down for a normal drag");
+        f.pointer(down, 300);
+        runtime::InputBrokerTestAccess::expireChord(f.broker);
+        require(sends.size() == 3 && sends[2].inputs.size() == 1 && f.pointer(up, 400) == kPassed,
+                "the chord deadline releases a held down and its eventual up passes normally");
+    }
+    {
+        BrokerFixture f;
+        require(f.pointer(WM_LBUTTONDOWN, 100) == 1 && f.pointer(WM_RBUTTONDOWN, 160) == kPassed &&
+                posts.empty() && sends.size() == 1 && sends[0].inputs[0].mi.dwFlags == MOUSEEVENTF_LEFTDOWN,
+                "a stale pending button cannot toggle even if its timer message was delayed");
+        require(f.pointer(WM_LBUTTONUP, 161) == kPassed && f.pointer(WM_RBUTTONUP, 162) == kPassed,
+                "both regular ups pass following a slow overlap");
+    }
+    {
+        BrokerFixture f; timerAvailable = false;
+        require(f.mouse(WM_RBUTTONDOWN) == kPassed && f.mouse(WM_RBUTTONUP) == kPassed &&
+                sends.empty() && posts.empty(), "timer failure leaves physical clicks alone");
+        f.configure(false); timerAvailable = true;
+        require(f.mouse(WM_LBUTTONDOWN) == kPassed && f.mouse(WM_RBUTTONDOWN) == kPassed &&
+                f.mouse(WM_LBUTTONUP) == kPassed && f.mouse(WM_RBUTTONUP) == kPassed &&
+                sends.empty() && posts.empty(), "paused input never delays or owns a new click");
+    }
+    {
+        BrokerFixture f;
+        require(f.mouse(WM_MOUSEWHEEL, 1) == kPassed && !f.wheel(), "plain wheel scrolls normally while zoom mode is off");
+        f.broker.setPlainWheel(true);
+        keyReads = 0;
+        require(f.mouse(WM_MOUSEWHEEL, 1) == 1 && f.wheel() == 1 && !keyReads && sends.empty(),
+                "an active mode consumes fractional wheel deltas without consulting modifier APIs");
+        f.record.down = 1; f.record.phase = static_cast<LONG>(pinch::Phase::Pinch);
+        require(f.mouse(WM_MOUSEWHEEL, 30) == kPassed && f.wheel() == 1,
+                "the active three-finger pinch keeps its own input and doesn't swallow wheel entries it can't apply");
+        f.record.down = 0; f.record.magnifierReady = 0;
+        require(f.mouse(WM_MOUSEWHEEL, -120) == kPassed && f.wheel() == 1,
+                "a stale mode flag cannot steal ordinary scrolling after the magnifier closes");
+        f.record.magnifierReady = 1; f.key(VK_LWIN, true);
+        require(f.key(VK_ESCAPE, true) == kPassed && f.key(VK_ESCAPE, true) == kPassed &&
+                posts.size() == 1 && posts[0].w == runtime::kExitZoomAction,
+                "Win+Escape stays native while noticing one exit at its first down");
+        f.key(VK_ESCAPE, false); f.key(VK_LWIN, false);
+        require(f.mouse(WM_MOUSEWHEEL, -120) == kPassed && f.wheel() == 1,
+                "Win+Escape immediately restores ordinary wheel handling even before the host processes its message");
+    }
+    {
+        BrokerFixture f; sendResults = {1, 0};
+        require(f.mouse(WM_LBUTTONDOWN) == 1 && f.mouse(WM_LBUTTONUP) == kPassed &&
+                sends.size() == 2 && sends[1].inputs[0].mi.dwFlags == MOUSEEVENTF_LEFTUP,
+                "if a short replay sends only down, a failed up retry leaves the physical up available");
     }
     {
         BrokerFixture f; f.key(VK_LWIN, true); keys[0xe8] = true;

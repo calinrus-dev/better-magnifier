@@ -4,14 +4,14 @@
 // @name:es-ES      Better Magnifier
 // @description     KWin-inspired accessibility: smooth pinch and mouse-wheel zoom for native Windows Magnifier
 // @description:es-ES Accesibilidad inspirada en KWin: zoom fluido con pellizco y rueda para la Lupa nativa de Windows
-// @version         0.7.5
+// @version         0.8.0
 // @author          calinrus-dev
 // @github          https://github.com/calinrus-dev
 // @homepage        https://github.com/calinrus-dev/better-magnifier
 // @include         explorer.exe
 // @include         magnify.exe
 // @architecture    amd64
-// @compilerOptions -DNOMINMAX -static -lhid -lwtsapi32 -lshell32 -ladvapi32 -ldwmapi -lole32
+// @compilerOptions -DNOMINMAX -static -lhid -lwtsapi32 -lshell32 -ladvapi32 -ldwmapi -lole32 -lgdi32
 // @license         GPL-3.0-or-later
 // ==/WindhawkMod==
 
@@ -25,7 +25,10 @@
 # Better Magnifier - experimental
 
 Spread three fingers to magnify the desktop; pinch them together to zoom out.
-Win+mouse wheel provides proportional smooth zoom; Win+middle click resets.
+Press the left and right mouse buttons together to toggle zoom. A thin red
+screen outline indicates zoom mode. The wheel zooms on its own in that mode.
+Win+wheel starts zoom, and Win+middle click resets. Win+plus/minus also works
+with the numeric keypad. To share an app without desktop zoom, capture its window.
 Ctrl+Alt+wheel switches windows. The mouse profile is configurable.
 Two-finger app zoom and Windows three/four-finger swipe settings are untouched.
 A Precision Touchpad and Windows build 26200 are required. A companion in
@@ -74,7 +77,7 @@ https://github.com/calinrus-dev/better-magnifier
   $description: Enables pinch and smooth wheel zoom. Turn off to retain standard Windows behavior.
 - smoothWheel: true
   $name: Smooth mouse wheel zoom
-  $description: Uses continuous native zoom instead of jumps. Ordinary scrolling is unchanged.
+  $description: Uses continuous native zoom. The wheel scrolls normally with zoom mode off unless you hold the zoom modifier.
 - winWheel: true
   $name: Use Win + mouse wheel for zoom
   $description: Win + wheel zooms; Win + middle click resets to 100%. Disable to use Ctrl+Alt instead. Uses a neutral menu-mask key to prevent Start opening on release; elevated apps may reject it.
@@ -136,6 +139,7 @@ https://github.com/calinrus-dev/better-magnifier
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -163,17 +167,18 @@ struct Report {
 class FrameAssembler {
     std::uint32_t expected_ = 0;
     std::optional<std::uint32_t> scan_;
-    std::vector<Contact> contacts_;
+    std::array<Contact, kMaxContacts> contacts_{};
+    std::size_t size_ = 0;
     std::uint64_t started_ = 0;
 
 public:
     void reset() {
         expected_ = 0;
         scan_.reset();
-        contacts_.clear();
+        size_ = 0;
     }
-    std::optional<std::vector<Contact>> feed(const Report& report,
-                                             std::uint64_t now) {
+    // The returned view remains valid until the next call to feed.
+    std::optional<std::span<const Contact>> feed(const Report& report, std::uint64_t now) {
         if (report.count > kMaxContacts) {
             reset();
             return std::nullopt;
@@ -192,20 +197,20 @@ public:
             // still useful because it ends a gesture immediately.
             if (std::none_of(report.contacts.begin(), report.contacts.end(),
                              [](const Contact& c) { return c.down; })) {
-                return std::vector<Contact>{};
+                return std::span<const Contact>{};
             }
             return std::nullopt;
         }
         for (const auto& contact : report.contacts) {
-            if (contacts_.size() == expected_) {
+            if (size_ == expected_) {
                 break;  // Remaining descriptor slots are padding.
             }
-            contacts_.push_back(contact);
+            contacts_[size_++] = contact;
         }
-        if (contacts_.size() < expected_) {
+        if (size_ < expected_) {
             return std::nullopt;
         }
-        auto result = std::move(contacts_);
+        const std::span<const Contact> result{contacts_.data(), size_};
         reset();
         return result;
     }
@@ -326,20 +331,20 @@ public:
     void adoptZoom(double zoom) {
         if (std::isfinite(zoom) && zoom >= 1) zoom_ = zoom;
     }
-    Decision update(const std::vector<Contact>& frame, std::uint64_t now,
+    Decision update(std::span<const Contact> frame, std::uint64_t now,
                     double currentZoom, const Config& config, double elapsedMs = -1) {
-        std::vector<Contact> active;
+        std::array<Contact, 3> active{};
+        std::size_t count = 0;
         for (const auto& contact : frame) {
-            if (contact.down) {
-                if (!contact.confident || !std::isfinite(contact.point.x) ||
-                    !std::isfinite(contact.point.y)) {
-                    reset();
-                    return {};
-                }
-                active.push_back(contact);
+            if (!contact.down) continue;
+            if (count == active.size() || !contact.confident ||
+                !std::isfinite(contact.point.x) || !std::isfinite(contact.point.y)) {
+                reset();
+                return {};
             }
+            active[count++] = contact;
         }
-        if (active.size() != 3) {
+        if (count != active.size()) {
             reset();
             return {};
         }
@@ -357,8 +362,9 @@ public:
         }
         double radius = 0;
         for (const auto& c : active) {
-            radius += std::pow(c.point.x - center.x, 2) +
-                      std::pow(c.point.y - center.y, 2);
+            const double dx = c.point.x - center.x;
+            const double dy = c.point.y - center.y;
+            radius += dx * dx + dy * dy;
         }
         radius = std::sqrt(radius / 3);
         if (phase_ == Phase::Idle || ids != ids_ || now - lastTime_ > 150) {
@@ -380,12 +386,15 @@ public:
             return {phase_, std::nullopt, false};
         }
         const double scale = radius / radius_;
-        if (scale <= 0 || !std::isfinite(scale) ||
-            std::abs(std::log(scale / previousScale_)) > 0.5) {
+        if (scale <= 0 || !std::isfinite(scale)) {
             phase_ = Phase::Rejected;
             return {phase_, std::nullopt, false};
         }
         const double scaleDelta = std::log(scale / previousScale_);
+        if (std::abs(scaleDelta) > 0.5) {
+            phase_ = Phase::Rejected;
+            return {phase_, std::nullopt, false};
+        }
         previousScale_ = scale;
         movement_ = {center.x - start_.x, center.y - start_.y};
         const double travel = std::hypot(movement_.x, movement_.y);
@@ -677,6 +686,7 @@ public:
     }
     bool winDown() const { return held(leftWin) || held(rightWin); }
     bool winOnly() const { return winDown() && !otherHeld(); }
+    bool idle() const { return !winDown() && !otherHeld(); }
     bool consume() {
         if (!winOnly()) return false;
         if (keyboardUsed_ || maskIssued_) return false;
@@ -915,8 +925,8 @@ bool resolve(HMODULE module, Kind kind, void** targets, std::size_t count) {
 namespace bridge {
 enum class InputSource : LONG { None = 0, Pinch = 1, Wheel = 2, Keyboard = 3, Reset = 4 };
 inline volatile LONG* desktopRaised = nullptr;
-constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v14";
-constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v14";
+constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v15";
+constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v15";
 struct alignas(8) Record {
     volatile LONG phase;
     volatile LONG down;
@@ -989,8 +999,10 @@ struct alignas(8) Record {
     volatile LONG windowSwitchConfirmed;
     volatile LONG windowSwitchRejected;
     volatile LONG windowSwitchDeferredFailed;
+    volatile LONG zoomModeActive;
+    volatile LONG nativeZoomInputTime;
 };
-// Only the native UI produces wheel input. The host consumes one bounded
+// The mouse broker and native UI can produce wheel input. The host consumes one bounded
 // packet per frame; no per-delta posted messages can starve WM_TIMER.
 inline void enqueueWheel(Record* record, int delta, LONG revision, std::uint64_t now) {
     if (!record || !delta || InterlockedCompareExchange(&record->inputRevision, 0, 0) != revision) return;
@@ -1235,6 +1247,8 @@ constexpr UINT kStopMessage = WM_APP + 1;
 constexpr UINT kSettingsMessage = WM_APP + 2;
 constexpr UINT kWheelMessage = WM_APP + 3;
 constexpr UINT kMouseActionMessage = WM_APP + 4;
+constexpr WPARAM kToggleZoomAction = 4;
+constexpr WPARAM kExitZoomAction = 5;
 constexpr UINT_PTR kTimer = 1;
 constexpr int kResetHotkey = 1;
 constexpr int kPauseHotkey = 2;
@@ -1248,6 +1262,162 @@ void log(const wchar_t* message) {
     Wh_Log(L"%s", message);
 #endif
 }
+
+// Separate narrow windows keep the DWM surfaces proportional to the drawn
+// pixels and allow the entire frame to be excluded from window capture.
+class ZoomBorder {
+    using CreateInBand = HWND(WINAPI*)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int,
+                                       HWND, HMENU, HINSTANCE, LPVOID, DWORD);
+    using ReadBand = BOOL(WINAPI*)(HWND, DWORD*);
+    static constexpr wchar_t kClassName[] = L"BetterMagnifier.ZoomBorder";
+
+    HINSTANCE module_ = nullptr;
+    HWND target_ = nullptr;
+    UINT topologyMessage_ = 0;
+    std::vector<HWND> strips_;
+    bool registered_ = false;
+    bool refreshPosted_ = false;
+    bool active_ = false;
+
+    static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM w, LPARAM l) {
+        if (message == WM_NCCREATE)
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams));
+        if (message == WM_NCHITTEST) return HTTRANSPARENT;
+        if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+        if (message == WM_DISPLAYCHANGE || message == WM_DWMCOMPOSITIONCHANGED) {
+            auto* self = reinterpret_cast<ZoomBorder*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+            if (self && !self->refreshPosted_)
+                self->refreshPosted_ = PostMessageW(self->target_, self->topologyMessage_, TRUE, 0) != FALSE;
+        }
+        return DefWindowProcW(window, message, w, l);
+    }
+
+    bool registerClass() {
+        if (registered_) return true;
+        const HBRUSH brush = CreateSolidBrush(RGB(255, 0, 0));
+        if (!brush) return false;
+        WNDCLASSW cls{};
+        cls.hInstance = module_;
+        cls.lpfnWndProc = windowProc;
+        cls.lpszClassName = kClassName;
+        cls.hbrBackground = brush;
+        if (!RegisterClassW(&cls)) {
+            DeleteObject(brush);
+            return false;
+        }
+        registered_ = true;
+        return true;
+    }
+
+    static BOOL CALLBACK addMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM data) {
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (!GetMonitorInfoW(monitor, &info)) return FALSE;
+        auto& bounds = *reinterpret_cast<std::vector<RECT>*>(data);
+        bounds.push_back(info.rcMonitor);
+        return TRUE;
+    }
+
+    void clearWindows() {
+        for (const auto window : std::exchange(strips_, {})) DestroyWindow(window);
+    }
+
+    HWND createStrip(const RECT& edge, ReadBand readBand, CreateInBand createInBand) {
+        constexpr DWORD ex = WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_LAYERED;
+        constexpr DWORD uiAccessBand = 2;
+        const auto width = edge.right - edge.left, height = edge.bottom - edge.top;
+        DWORD band = 0;
+        // Magnify already runs in UIAccess. Its windows must be composed
+        // above the magnified desktop to keep the border pinned to the screen.
+        auto window = CreateWindowExW(ex, kClassName, L"", WS_POPUP, edge.left, edge.top, width, height,
+                                      nullptr, nullptr, module_, this);
+        if (window && readBand(window, &band) && band == uiAccessBand) return window;
+        if (window) DestroyWindow(window);
+        if (!createInBand) return nullptr;
+        window = createInBand(ex, kClassName, L"", WS_POPUP, edge.left, edge.top, width, height,
+                              nullptr, nullptr, module_, this, uiAccessBand);
+        if (window && readBand(window, &band) && band == uiAccessBand) return window;
+        if (window) DestroyWindow(window);
+        return nullptr;
+    }
+
+    bool build() {
+        const HMODULE user = GetModuleHandleW(L"user32.dll");
+        if (!user) return false;
+        const auto readBand = reinterpret_cast<ReadBand>(GetProcAddress(user, "GetWindowBand"));
+        if (!readBand) return false;
+        const auto createInBand = reinterpret_cast<CreateInBand>(GetProcAddress(user, "CreateWindowInBand"));
+        const auto oldDpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        if (!oldDpi) return false;
+        struct DpiScope {
+            DPI_AWARENESS_CONTEXT previous;
+            ~DpiScope() { SetThreadDpiAwarenessContext(previous); }
+        } dpiScope{oldDpi};
+        if (!registerClass()) return false;
+        std::vector<RECT> bounds;
+        if (!EnumDisplayMonitors(nullptr, nullptr, addMonitor, reinterpret_cast<LPARAM>(&bounds)) || bounds.empty()) return false;
+        for (const auto& monitor : bounds) {
+            for (const auto& edge : edges(monitor)) {
+                if (edge.right <= edge.left || edge.bottom <= edge.top) continue;
+                const auto window = createStrip(edge, readBand, createInBand);
+                if (!window) return false;
+                if (!target_) { DestroyWindow(window); return false; }
+                strips_.push_back(window);
+                DWORD affinity = WDA_NONE;
+                if (!SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA) ||
+                    !SetWindowDisplayAffinity(window, WDA_EXCLUDEFROMCAPTURE) ||
+                    !GetWindowDisplayAffinity(window, &affinity) || affinity != WDA_EXCLUDEFROMCAPTURE)
+                    return false;
+            }
+        }
+        // Every strip has accepted capture exclusion before any is shown.
+        const auto windows = strips_;
+        for (const auto window : windows) {
+            if (!target_) return false;
+            ShowWindow(window, SW_SHOWNOACTIVATE);
+        }
+        return !strips_.empty();
+    }
+
+public:
+    static std::array<RECT, 4> edges(const RECT& monitor) {
+        constexpr LONG width = 2; // Coordinates are physical on a per-monitor-aware thread.
+        const auto [left, top, right, bottom] = monitor;
+        if (right - left <= 2 * width || bottom - top <= 2 * width) return {monitor, {}, {}, {}};
+        return {{{left, top, right, top + width},
+                 {left, bottom - width, right, bottom},
+                 {left, top + width, left + width, bottom - width},
+                 {right - width, top + width, right, bottom - width}}};
+    }
+    void initialize(HINSTANCE module, HWND target, UINT topologyMessage) {
+        module_ = module;
+        target_ = target;
+        topologyMessage_ = topologyMessage;
+    }
+    void show(bool active, bool rebuild = false) {
+        if (rebuild) refreshPosted_ = false;
+        if (!target_ || (active == active_ && !rebuild)) return;
+        active_ = active;
+        clearWindows();
+        if (active && !build()) {
+            clearWindows();
+            log(L"Could not create the capture-excluded zoom border.");
+        }
+    }
+    void close() {
+        target_ = nullptr;
+        clearWindows();
+        if (registered_ && !UnregisterClassW(kClassName, module_)) {
+            // An outstanding window can still call its window procedure.
+            HMODULE pinned = nullptr;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                               reinterpret_cast<LPCWSTR>(&windowProc), &pinned);
+        }
+        registered_ = false;
+        active_ = false;
+        refreshPosted_ = false;
+    }
+};
 
 struct Slot {
     USHORT collection;
@@ -1267,6 +1437,7 @@ struct Device {
     bool hasScan = false;
     bool valid = false;
     pinch::FrameAssembler assembler;
+    pinch::Report report;
     pinch::Recognizer recognizer;
     pinch::FrameTiming timing;
     std::optional<std::uint32_t> frameScan;
@@ -1652,12 +1823,16 @@ class MouseInputBroker {
     inline static decltype(&keybd_event) apiKeyEvent = keybd_event;
     inline static decltype(&PostMessageW) apiPost = PostMessageW;
     inline static decltype(&CallNextHookEx) apiNext = CallNextHookEx;
+    inline static decltype(&SetTimer) apiSetTimer = SetTimer;
+    inline static decltype(&KillTimer) apiKillTimer = KillTimer;
 #else
     inline static const auto apiReadKey = GetAsyncKeyState;
     inline static const auto apiSendInput = SendInput;
     inline static const auto apiKeyEvent = keybd_event;
     inline static const auto apiPost = PostMessageW;
     inline static const auto apiNext = CallNextHookEx;
+    inline static const auto apiSetTimer = SetTimer;
+    inline static const auto apiKillTimer = KillTimer;
 #endif
 
     HANDLE thread_ = nullptr, ready_ = nullptr;
@@ -1668,11 +1843,118 @@ class MouseInputBroker {
     std::atomic<unsigned> options_{0};
     std::atomic<unsigned> resync_{0}; // Owner thread applies key/button resets before the next physical input.
     std::atomic<bool> installed_{false};
+    std::atomic<bool> plainWheel_{false};
     inline static thread_local MouseInputBroker* owner_ = nullptr;
     pinch::WinMenuMask menu_;
     pinch::MouseButtonOwnership buttons_;
     static constexpr ULONG_PTR kMaskTag = 0x424d3037;
+    static constexpr DWORD kChordTime = 45;
+    UINT_PTR chordTimer_ = 0;
+    unsigned primaryDown_ = 0, pendingButton_ = 0;
+    bool chordOwned_ = false, escapeDown_ = false;
+    POINT pendingPoint_{};
+    DWORD pendingTime_ = 0;
+    struct IntegrityCache { DWORD pid = 0, level = 0; };
+    IntegrityCache pointerIntegrity_, foregroundIntegrity_;
+    DWORD ownIntegrity_ = 0;
+
+    static DWORD integrity(HANDLE process) {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(process, TOKEN_QUERY, &token)) return 0;
+        alignas(TOKEN_MANDATORY_LABEL) std::array<BYTE, 128> data{};
+        DWORD size = 0, result = 0;
+        if (GetTokenInformation(token, TokenIntegrityLevel, data.data(), static_cast<DWORD>(data.size()), &size)) {
+            PSID sid = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(data.data())->Label.Sid;
+            if (IsValidSid(sid)) {
+                const unsigned count = *GetSidSubAuthorityCount(sid);
+                if (count) result = *GetSidSubAuthority(sid, count - 1);
+            }
+        }
+        CloseHandle(token);
+        return result;
+    }
+    static DWORD windowIntegrity(HWND window, IntegrityCache& cache) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(window, &pid);
+        if (!pid) return 0;
+        if (pid != cache.pid) {
+            cache.pid = pid;
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            cache.level = process ? integrity(process) : 0;
+            if (process) CloseHandle(process);
+        }
+        return cache.level;
+    }
+    bool canReplayAt(POINT point) {
+#ifdef PINCH_ZOOM_RUNTIME_TEST
+        if (!thread_) return true;
+#endif
+        // SendInput is constrained by UIPI. Forward physical input untouched
+        // when the application beneath it is elevated or its level is unknown.
+        const DWORD pointer = windowIntegrity(WindowFromPoint(point), pointerIntegrity_);
+        const HWND foreground = GetForegroundWindow();
+        const DWORD focused = foreground ? windowIntegrity(foreground, foregroundIntegrity_) : ownIntegrity_;
+        return pointer && pointer <= ownIntegrity_ && focused && focused <= ownIntegrity_;
+    }
+    unsigned takePendingButton() {
+        if (chordTimer_) apiKillTimer(nullptr, std::exchange(chordTimer_, 0));
+        return std::exchange(pendingButton_, 0);
+    }
+    bool replayButton(bool released = false) {
+        const auto button = takePendingButton();
+        if (!button) return false;
+        INPUT input[2]{};
+        for (auto& item : input) {
+            item.type = INPUT_MOUSE;
+            item.mi.dwExtraInfo = kMaskTag;
+        }
+        input[0].mi.dwFlags = button == 1 ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_RIGHTDOWN;
+        input[0].mi.time = pendingTime_;
+        input[1].mi.dwFlags = button == 1 ? MOUSEEVENTF_LEFTUP : MOUSEEVENTF_RIGHTUP;
+        const UINT count = released ? 2 : 1;
+        const UINT sent = apiSendInput(count, input, sizeof(INPUT));
+        if (released && sent == 1) return apiSendInput(1, &input[1], sizeof(INPUT)) == 1;
+        if (!released && !sent) pendingButton_ = button; // Retry the pair on physical release.
+        return released || sent == count;
+    }
+    bool movedFromDeferredClick(POINT point) const {
+        return std::abs(point.x - pendingPoint_.x) >= 4 || std::abs(point.y - pendingPoint_.y) >= 4;
+    }
+    bool primaryEvent(WPARAM message, const MSLLHOOKSTRUCT& event, bool mayChord) {
+        const bool down = message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN;
+        const unsigned button = message == WM_LBUTTONDOWN || message == WM_LBUTTONUP ? 1 : 2;
+        const bool wasDown = (primaryDown_ & button) != 0;
+        if (down) primaryDown_ |= button;
+        else primaryDown_ &= ~button;
+        if (chordOwned_) {
+            if (!primaryDown_) chordOwned_ = false;
+            return true;
+        }
+        if (!down) {
+            if (pendingButton_ != button) return false;
+            return replayButton(true); // A failed synthetic up can still use the real one.
+        }
+        if (wasDown) return pendingButton_ == button;
+        if (pendingButton_) {
+            if (chordTimer_ && mayChord && event.time - pendingTime_ <= kChordTime && !movedFromDeferredClick(event.pt) &&
+                apiPost(target_, kMouseActionMessage, kToggleZoomAction, 0)) {
+                takePendingButton();
+                chordOwned_ = true;
+                return true;
+            }
+            replayButton();
+            return false;
+        }
+        if (!mayChord || primaryDown_ != button || !canReplayAt(event.pt)) return false;
+        chordTimer_ = apiSetTimer(nullptr, 0, kChordTime, nullptr);
+        if (!chordTimer_) return false;
+        pendingButton_ = button;
+        pendingPoint_ = event.pt;
+        pendingTime_ = event.time;
+        return true;
+    }
     void consumeResync() {
+        if (!resync_.load(std::memory_order_relaxed)) return;
         const unsigned requested = resync_.exchange(0, std::memory_order_acq_rel);
         if (!requested) return;
         menu_.reset();
@@ -1682,7 +1964,13 @@ class MouseInputBroker {
             if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || vk == 0xe8) continue;
             if (apiReadKey(static_cast<int>(vk)) & 0x8000) menu_.key(vk, true);
         }
-        if (requested & 2u) buttons_.reset();
+        if (requested & 2u) {
+            takePendingButton();
+            buttons_.reset();
+            chordOwned_ = escapeDown_ = false;
+            primaryDown_ = ((apiReadKey(VK_LBUTTON) & 0x8000) ? 1u : 0u) |
+                           ((apiReadKey(VK_RBUTTON) & 0x8000) ? 2u : 0u);
+        }
     }
     bool maskStart() {
         if (!menu_.consume()) return true;
@@ -1703,8 +1991,18 @@ class MouseInputBroker {
     static LRESULT CALLBACK keyboard(int code, WPARAM message, LPARAM data) {
         if (code == HC_ACTION && owner_) {
             const auto* event = reinterpret_cast<const KBDLLHOOKSTRUCT*>(data);
-            if (!(event->flags & LLKHF_INJECTED)) owner_->consumeResync();
             const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+            if (!(event->flags & LLKHF_INJECTED)) {
+                owner_->consumeResync();
+                if (down && owner_->chordTimer_) owner_->replayButton();
+                if (event->vkCode == VK_ESCAPE) {
+                    if (down && !owner_->escapeDown_ && owner_->menu_.winOnly() && (owner_->options_.load() & 1u)) {
+                        owner_->plainWheel_.store(false);
+                        apiPost(owner_->target_, kMouseActionMessage, kExitZoomAction, 0);
+                    }
+                    owner_->escapeDown_ = down;
+                }
+            }
             // Disguise a consumed mouse chord at physical Win release as well:
             // Win auto-repeat can invalidate the earlier mouse-side mask.
             // keybd_event runs this neutral pair before CallNext exposes Win UP;
@@ -1724,6 +2022,18 @@ class MouseInputBroker {
         const auto* event = reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
         if (event->flags & LLMHF_INJECTED) return apiNext(nullptr, code, message, data);
         broker->consumeResync();
+        const unsigned flags = broker->options_.load();
+        if (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP || message == WM_RBUTTONDOWN || message == WM_RBUTTONUP) {
+            const bool mayChord = (flags & 1u) && broker->menu_.idle() &&
+                broker->state_->nativeViewMode != 1 && broker->state_->nativeViewMode != 3 &&
+                compatibility::mouseZoomAllowed(static_cast<std::uint32_t>(broker->state_->nativeCaps),
+                                                 broker->state_->resolverReasonNative, broker->state_->nativeError);
+            if (broker->primaryEvent(message, *event, mayChord)) return 1;
+        } else if (broker->chordTimer_ &&
+                   (message != WM_MOUSEMOVE || broker->movedFromDeferredClick(event->pt))) {
+            // A drag or another mouse action needs the original button down immediately.
+            broker->replayButton();
+        }
         const auto forward = [&]() -> LRESULT {
             if (message == WM_MBUTTONDOWN) broker->buttons_.press(1, false);
             if (message == WM_RBUTTONDOWN) broker->buttons_.press(2, false);
@@ -1735,8 +2045,20 @@ class MouseInputBroker {
         const unsigned button = message == WM_MBUTTONDOWN ? 1 : message == WM_RBUTTONDOWN ? 2 : 3;
         if (button < 3 && broker->buttons_.pressed(button)) return broker->buttons_.owned(button) ? 1 : forward();
         if (message != WM_MOUSEWHEEL && message != WM_MBUTTONDOWN && message != WM_RBUTTONDOWN) return forward();
-        const unsigned flags = broker->options_.load();
         if (!(flags & 1)) return forward();
+        const bool zoomUsable = broker->state_->nativeViewMode != 1 && broker->state_->nativeViewMode != 3 &&
+            compatibility::mouseZoomAllowed(static_cast<std::uint32_t>(broker->state_->nativeCaps),
+                                             broker->state_->resolverReasonNative, broker->state_->nativeError);
+        const bool pinching = broker->state_->down && broker->state_->phase == static_cast<LONG>(pinch::Phase::Pinch);
+        if (message == WM_MOUSEWHEEL && broker->menu_.idle() && broker->plainWheel_.load() && (flags & 8u) &&
+            zoomUsable && broker->state_->magnifierReady && !pinching) {
+            const int delta = static_cast<SHORT>(HIWORD(event->mouseData));
+            if (!delta) return forward();
+            bridge::enqueueWheel(broker->state_, delta,
+                InterlockedCompareExchange(&broker->state_->inputRevision, 0, 0), GetTickCount64());
+            InterlockedIncrement(&broker->state_->wheelEvents);
+            return 1;
+        }
         const bool ctrl = (apiReadKey(VK_CONTROL) & 0x8000) != 0;
         const bool alt = (apiReadKey(VK_MENU) & 0x8000) != 0;
         const bool shift = (apiReadKey(VK_SHIFT) & 0x8000) != 0;
@@ -1744,9 +2066,7 @@ class MouseInputBroker {
         const bool winZoom = (flags & 2) && win && !ctrl && !alt && !shift && broker->menu_.winOnly();
         const bool ctrlAlt = ctrl && alt && !win && !shift;
         const bool otherMode = broker->state_->nativeViewMode == 1 || broker->state_->nativeViewMode == 3;
-        const bool zoomUsable = !otherMode && compatibility::mouseZoomAllowed(
-            static_cast<std::uint32_t>(broker->state_->nativeCaps), broker->state_->resolverReasonNative, broker->state_->nativeError);
-        const bool zoom = zoomUsable && (flags & 8) && ((flags & 2) ? winZoom : ctrlAlt);
+        const bool zoom = zoomUsable && !pinching && (flags & 8) && ((flags & 2) ? winZoom : ctrlAlt);
         if (message == WM_MOUSEWHEEL) {
             const int delta = static_cast<SHORT>(HIWORD(event->mouseData));
             if (delta && zoom && (!(flags & 2) || broker->maskStart())) {
@@ -1779,6 +2099,9 @@ class MouseInputBroker {
     static DWORD WINAPI run(void* parameter) {
         auto* broker = static_cast<MouseInputBroker*>(parameter);
         owner_ = broker;
+        broker->ownIntegrity_ = integrity(GetCurrentProcess());
+        broker->primaryDown_ = ((apiReadKey(VK_LBUTTON) & 0x8000) ? 1u : 0u) |
+                               ((apiReadKey(VK_RBUTTON) & 0x8000) ? 2u : 0u);
         broker->menu_.key(VK_LWIN, (apiReadKey(VK_LWIN) & 0x8000) != 0);
         broker->menu_.key(VK_RWIN, (apiReadKey(VK_RWIN) & 0x8000) != 0);
         MSG message{};
@@ -1789,8 +2112,13 @@ class MouseInputBroker {
         InterlockedExchange(&broker->state_->mouseHooksReady, keys && pointer ? 1 : 0);
         SetEvent(broker->ready_);
         while (keys && pointer && GetMessageW(&message, nullptr, 0, 0) > 0) {
+            if (!message.hwnd && message.message == WM_TIMER && message.wParam == broker->chordTimer_) {
+                broker->replayButton();
+                continue;
+            }
             TranslateMessage(&message); DispatchMessageW(&message);
         }
+        broker->replayButton();
         if (pointer) UnhookWindowsHookEx(pointer);
         if (keys) UnhookWindowsHookEx(keys);
         broker->installed_.store(false);
@@ -1818,6 +2146,7 @@ public:
     void requestResync(bool clearButtons = false) {
         resync_.fetch_or(clearButtons ? 3u : 1u, std::memory_order_release);
     }
+    void setPlainWheel(bool active) { plainWheel_.store(active); }
     void stop() {
         options_.store(0);
         if (thread_) {
@@ -1836,6 +2165,7 @@ class Host {
 #endif
     pinch::Config config_;
     std::map<HANDLE, Device> devices_;
+    std::vector<BYTE> rawInputBuffer_;
     Zoom zoom_;
     HWND window_ = nullptr;
     HANDLE activeDevice_ = nullptr;
@@ -1866,6 +2196,81 @@ class Host {
     int coldWheelDelta_ = 0;
     std::uint64_t coldWheelDeadline_ = 0;
     LONG coldWheelCommands_ = 0;
+    bool zoomModeActive_ = false, zoomModePublished_ = false;
+    bool nativeWasReady_ = false, awaitingNormal_ = false;
+    DWORD disarmedAt_ = 0;
+    double savedZoom_ = 1.5;
+    std::optional<std::uint64_t> toggleDeadline_;
+    bool zoomInputEnabled() const {
+        return sessionActive_ && !paused_ && config_.enabled && !config_.observeOnly && config_.keyboardInterop;
+    }
+    void publishZoomMode(bool ready) {
+        const bool active = ready && zoomModeActive_;
+        if (active == zoomModePublished_) return;
+        zoomModePublished_ = active;
+        mouseInput_.setPlainWheel(active);
+        if (auto* state = bridge_.get()) {
+            InterlockedExchange(&state->zoomModeActive, active ? 1 : 0);
+            bridge_.wake();
+        }
+    }
+    void disarmZoomMode() {
+        toggleDeadline_.reset();
+        zoomModeActive_ = false;
+        awaitingNormal_ = true;
+        disarmedAt_ = GetTickCount();
+        publishZoomMode(false);
+    }
+    void updateZoomMode(std::uint64_t now) {
+        auto* state = bridge_.get();
+        const bool ready = state && zoomInputEnabled() && state->nativeViewMode != 1 && state->nativeViewMode != 3 &&
+                           bridge_.magnifierAvailable();
+        if (!ready) {
+            if (nativeWasReady_ || (toggleDeadline_ && now >= *toggleDeadline_)) {
+                toggleDeadline_.reset();
+                zoomModeActive_ = false;
+            }
+            nativeWasReady_ = false;
+            awaitingNormal_ = false;
+            publishZoomMode(false);
+            return;
+        }
+        nativeWasReady_ = true;
+        const LONG level = state->overviewSavedLevel > 0 ? state->overviewSavedLevel : state->nativeLevel;
+        const auto keyboardTime = static_cast<DWORD>(state->nativeZoomInputTime);
+        const bool freshKey = keyboardTime && static_cast<std::int32_t>(keyboardTime - disarmedAt_) > 0;
+        if (awaitingNormal_ && (level <= 10000 || (freshKey && state->pendingCommand != 3))) awaitingNormal_ = false;
+        if (toggleDeadline_) {
+            if (now >= *toggleDeadline_) toggleDeadline_.reset();
+            else if (state->pendingCommand != 3) {
+                const LONG sequence = state->requestedSequence;
+                if (zoom_.target(std::min(savedZoom_, config_.maxZoom), true, bridge::InputSource::Keyboard) &&
+                    state->requestedSequence != sequence) {
+                    zoomModeActive_ = true;
+                    awaitingNormal_ = false;
+                    toggleDeadline_.reset();
+                }
+            }
+        }
+        if (level > 10000 && !awaitingNormal_ && !toggleDeadline_) {
+            savedZoom_ = level / 10000.0;
+            zoomModeActive_ = true;
+        }
+        publishZoomMode(true);
+    }
+    void toggleZoomMode(std::uint64_t now) {
+        if (!zoomInputEnabled()) return;
+        updateZoomMode(now);
+        restartGestureTracking();
+        if (zoomModeActive_ || toggleDeadline_) {
+            disarmZoomMode();
+            zoom_.resetToNormal();
+        } else {
+            ensureNativeMagnifier(now, true);
+            toggleDeadline_ = now + 1500;
+            render(now);
+        }
+    }
     void cancelWheel(bool invalidate = true) {
         wheel_.cancel();
         if (invalidate) coldWheelDelta_ = 0;
@@ -1938,6 +2343,7 @@ class Host {
     void render(std::uint64_t now, bool deliverColdPinch = true) {
         if (!zoom_.tick(static_cast<double>(now - lastTick_), config_.smoothingMs,
                         config_.mouseFollow, config_.edgeMargin)) restartGestureTracking();
+        updateZoomMode(now);
         if (observedRevision_ != zoom_.revision()) {
             observedRevision_ = zoom_.revision();
             const double level = zoom_.current();
@@ -2024,6 +2430,7 @@ class Host {
         mouseInput_.requestResync(true);
         mouseInput_.configure(config_, sessionActive_ && !paused_);
         if (!active) {
+            disarmZoomMode();
             coldWheelDelta_ = 0; windowWheel_.reset();
             zoom_.restore();
             restartGestureTracking(); // Wait for release only if contacts were down.
@@ -2084,6 +2491,7 @@ class Host {
         // Observe the exit BEFORE accepting a fresh request. Otherwise a pinch
         // starting just after Win+Esc gets overwritten by close detection.
         if (exited) {
+            disarmZoomMode();
             coldWheelDelta_ = 0;
             zoom_.resetToNormal();
             if (!freshPinch) restartGestureTracking();
@@ -2209,12 +2617,13 @@ class Host {
         }
         dev.valid = dev.hasCount && !dev.slots.empty() && dev.slots.size() <= pinch::kMaxContacts;
         if (dev.valid) {
+            dev.report.contacts.reserve(dev.slots.size());
             ++statistics_.devices;
             log(L"Compatible Precision Touchpad HID descriptor found.");
         }
         return dev.valid ? &dev : nullptr;
     }
-    void frame(HANDLE handle, Device& dev, const std::vector<pinch::Contact>& contacts, ULONGLONG now, double elapsedMs) {
+    void frame(HANDLE handle, Device& dev, std::span<const pinch::Contact> contacts, ULONGLONG now, double elapsedMs) {
         ++statistics_.frames;
         dev.activeContacts = static_cast<unsigned>(std::count_if(contacts.begin(), contacts.end(), [](const auto& c) { return c.down; }));
         if (dev.activeContacts != 3) {
@@ -2342,11 +2751,10 @@ class Host {
             return;
         }
         ++statistics_.reports;
-        pinch::Report decoded;
+        auto& decoded = dev.report;
+        decoded.contacts.clear();
         decoded.count = *contactCount;
-        if (dev.hasScan) {
-            decoded.scan = value(kDigitizer, dev.scanCollection, kScanTime);
-        }
+        decoded.scan = dev.hasScan ? value(kDigitizer, dev.scanCollection, kScanTime) : std::nullopt;
         if (decoded.count && decoded.scan) dev.frameScan = decoded.scan;
         for (const auto& slot : dev.slots) {
             if (length == 0 || (slot.reportId != 0 && static_cast<UCHAR>(bytes[0]) != slot.reportId)) {
@@ -2382,10 +2790,14 @@ class Host {
         }
         const auto now = GetTickCount64();
         if (const auto complete = dev.assembler.feed(decoded, now)) {
-            LARGE_INTEGER counter{}, frequency{};
-            QueryPerformanceCounter(&counter);
-            QueryPerformanceFrequency(&frequency);
-            const double preciseMs = 1000.0 * static_cast<double>(counter.QuadPart) / frequency.QuadPart;
+            static const double counterToMs = [] {
+                LARGE_INTEGER frequency{};
+                return QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0
+                    ? 1000.0 / static_cast<double>(frequency.QuadPart) : 0.0;
+            }();
+            LARGE_INTEGER counter{};
+            const double preciseMs = counterToMs > 0 && QueryPerformanceCounter(&counter)
+                ? static_cast<double>(counter.QuadPart) * counterToMs : static_cast<double>(now);
             const double elapsed = dev.timing.advance(dev.frameScan, preciseMs);
             frame(handle, dev, *complete, now, elapsed);
         }
@@ -2396,17 +2808,17 @@ class Host {
             size < offsetof(RAWINPUT, data.hid.bRawData)) {
             return;
         }
-        std::vector<BYTE> buffer(size);
-        const UINT received = GetRawInputData(handle, RID_INPUT, buffer.data(), &size, sizeof(RAWINPUTHEADER));
-        if (received == UINT(-1) || received < offsetof(RAWINPUT, data.hid.bRawData)) {
+        if (size > rawInputBuffer_.size()) rawInputBuffer_.resize(size);
+        const UINT received = GetRawInputData(handle, RID_INPUT, rawInputBuffer_.data(), &size, sizeof(RAWINPUTHEADER));
+        if (received > rawInputBuffer_.size() || received < offsetof(RAWINPUT, data.hid.bRawData)) {
             return;
         }
-        const auto* raw = reinterpret_cast<const RAWINPUT*>(buffer.data());
+        auto* raw = reinterpret_cast<RAWINPUT*>(rawInputBuffer_.data());
         if (raw->header.dwType != RIM_TYPEHID) {
             return;
         }
         ++statistics_.rawPackets;
-        const auto& hid = raw->data.hid;
+        auto& hid = raw->data.hid;
         const auto payload = static_cast<std::size_t>(received) - offsetof(RAWINPUT, data.hid.bRawData);
         if (!hid.dwSizeHid || hid.dwCount > payload / hid.dwSizeHid) {
             return;
@@ -2415,7 +2827,7 @@ class Host {
             for (DWORD i = 0; i < hid.dwCount; ++i) {
                 ++statistics_.hidReports;
                 report(raw->header.hDevice, *dev,
-                       reinterpret_cast<char*>(const_cast<BYTE*>(hid.bRawData)) + i * hid.dwSizeHid,
+                       reinterpret_cast<char*>(hid.bRawData) + i * hid.dwSizeHid,
                        hid.dwSizeHid);
             }
         }
@@ -2433,8 +2845,14 @@ class Host {
             case kMouseActionMessage:
                 if (!host->sessionActive_ || host->paused_ || !host->config_.enabled || host->config_.observeOnly) return 0;
                 if (w == 1) {
-                    host->coldWheelDelta_ = 0;
-                    host->cancelWheel(); host->zoom_.resetToNormal(); host->restartGestureTracking();
+                    host->disarmZoomMode();
+                    host->restartGestureTracking();
+                    host->zoom_.resetToNormal();
+                } else if (w == kToggleZoomAction) {
+                    host->toggleZoomMode(GetTickCount64());
+                } else if (w == kExitZoomAction) {
+                    host->disarmZoomMode();
+                    host->restartGestureTracking();
                 } else if (host->config_.windowButtons && host->config_.winWheel && (w == 2 || w == 3)) {
                     HWND target = reinterpret_cast<HWND>(l);
                     if (target == GetAncestor(GetForegroundWindow(), GA_ROOT) && WindowSwitcher::eligible(target))
@@ -2481,6 +2899,7 @@ class Host {
             }
             case WM_HOTKEY:
                 if (!host->sessionActive_) return 0;
+                host->disarmZoomMode();
                 host->zoom_.resetToNormal();
                 host->bridge_.syncNative();
                 host->restartGestureTracking();
@@ -2521,6 +2940,7 @@ class Host {
                 host->bridge_.configure(host->interactiveConfig());
                 host->mouseInput_.configure(host->config_, host->sessionActive_ && !host->paused_);
                 host->nativeLaunch_.resetAttempts();
+                if (!host->zoomInputEnabled()) host->disarmZoomMode();
                 if (!host->config_.enabled || host->config_.observeOnly) host->zoom_.resetToNormal();
                 host->bridge_.syncNative();
                 return 0;
@@ -2621,6 +3041,7 @@ public:
         }
     }
     ~Host() {
+        disarmZoomMode();
         mouseInput_.stop();
         cancelWheel();
         if (auto* state = bridge_.get()) InterlockedExchange64(&state->hostWindow, 0);
@@ -2718,7 +3139,7 @@ int wmain(int argc, wchar_t** argv) {
         std::printf("Start menu mask: initialSent=%ld; initialFailed=%ld; releaseAttempted=%ld\n", record->menuMaskInitialSent, record->menuMaskInitialFailed, record->menuMaskReleaseSent);
         std::printf("Window wheel: attempts=%ld; confirmed=%ld; immediateFailures=%ld; deferredFailures=%ld\n", record->windowSwitchAttempts, record->windowSwitchConfirmed, record->windowSwitchRejected, record->windowSwitchDeferredFailed);
         std::printf("Read-from-point: disabled=%ld; verifiedHooks=%ld\n", record->disableReading, record->readingReady);
-        std::printf("Wheel: enabled=%ld; active=%ld; nativeEvents=%ld\n", record->wheelEnabled, record->wheelActive, record->wheelEvents);
+        std::printf("Wheel: enabled=%ld; active=%ld; nativeEvents=%ld; zoomMode=%ld\n", record->wheelEnabled, record->wheelActive, record->wheelEvents, record->zoomModeActive);
         std::printf("Cursor clip protection: blocked=%ld\n", record->blockedCursorClips);
         std::printf("Shell view: mask=%ld; applied=%ld/%ld; pendingGestures=%ld; instantSwitch=%ld; direction=%ld\n", record->shellMask, record->shellApplied, record->shellRevision, record->pendingGestures, record->instantSwitch, record->swipeDirection);
         return mapping.hostAvailable() ? 0 : 3;
@@ -2997,7 +3418,7 @@ unsigned ownerWorkerStartCount = 0;
 std::atomic<HWND> messageWindow{nullptr};
 std::atomic<bool> stopping{false};
 std::atomic<unsigned> activeUpdates{0};
-constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v14";
+constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v15";
 std::atomic<DWORD> uiThread{0};
 std::atomic<void*> nativeSelf{nullptr}; // Dereferenced only on the native rendering thread.
 std::atomic<bool> uiControlReady{false};
@@ -3071,8 +3492,15 @@ decltype(&PostMessageW) keyboardPostMessage = PostMessageW;
 void cancelKeyboardHold(bool seal = true);
 bool freezeKeyboardHold();
 void pollKeyboardHold();
-const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v14");
+const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v15");
 constexpr UINT kClaimNativeOwner = WM_APP + 0x62;
+constexpr UINT kRefreshZoomBorder = WM_APP + 0x63;
+runtime::ZoomBorder zoomBorder;
+bool wantsZoomBorder(bridge::Record& state, std::uint64_t now) {
+    if (!state.zoomModeActive || !state.magnifierReady || !state.controlEnabled || !state.hostWindow) return false;
+    const auto heartbeat = static_cast<std::uint64_t>(InterlockedCompareExchange64(&state.heartbeat, 0, 0));
+    return heartbeat && (heartbeat >= now || now - heartbeat <= 250);
+}
 LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l);
 DWORD WINAPI worker(void*);
 BOOL CALLBACK visibility(HWND, LPARAM);
@@ -3183,6 +3611,7 @@ void ensureUi(void* self) {
         messageWindow.store(CreateWindowExW(0, kNativeClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, module, nullptr));
         if (messageWindow) {
             uiThread.store(GetCurrentThreadId());
+            zoomBorder.initialize(module, messageWindow.load(), kRefreshZoomBorder);
             refreshControlReady();
         }
     }
@@ -3348,13 +3777,14 @@ struct NativeCommandScope {
     }
     ~NativeCommandScope() { applyingPinch = previous; --nativeCommandDepth; }
 };
-void nativeCommandComplete(unsigned /*rendererBefore*/) {
+void nativeCommandComplete(unsigned /*rendererBefore*/, DWORD zoomInputTime = 0) {
     if (applyingPinch || nativeCommandDepth != 1) return; // One epoch per outermost command.
     void* keeper = nullptr;
     if (FAILED(getKeeper(&keeper)) || !keeper) return;
     // A synchronous setter is an intentional command result, even if the UI
     // cache lags behind it. Only unscoped animation callbacks are stale echoes.
     publish(nativeTargetObserved ? nativeObservedTarget : getOption(keeper, 14) / 100.0f);
+    if (zoomInputTime) InterlockedExchange(&mapping.get()->nativeZoomInputTime, static_cast<LONG>(zoomInputTime));
     InterlockedExchange(&mapping.get()->appliedSequence, mapping.get()->requestedSequence);
     InterlockedIncrement(&mapping.get()->inputRevision);
     InterlockedExchange(&mapping.get()->wheelActive, 0);
@@ -3582,7 +4012,7 @@ void zoomCommand(void* self, int command) {
             keyboardNativeClock = keyboardClock64();
         }
         originalZoomCommand(self, command); // A first tap and every unrelated command remain native.
-        nativeCommandComplete(scope.rendererBefore);
+        nativeCommandComplete(scope.rendererBefore, hotkey && direction > 0 ? keyboardHotkeyTimestamp : 0);
     }
     // A first Win-plus can itself create the renderer. Recheck after forwarding it.
     if (hotkey && keyboardHoldAvailable() && physicalZoomDirection(direction, keyboardHotkeyVk) == direction) {
@@ -3719,13 +4149,29 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
         } active;
         pollKeyboardHold(); return 0;
     }
+    if (message == kRefreshZoomBorder) {
+        struct ActiveBorder {
+            ActiveBorder() { activeUpdates.fetch_add(1); }
+            ~ActiveBorder() { activeUpdates.fetch_sub(1); }
+        } active;
+        if (!stopping.load()) {
+            auto* state = mapping.get();
+            zoomBorder.show(state && wantsZoomBorder(*state, GetTickCount64()), w != 0);
+        }
+        return 0;
+    }
     if (message == WM_CLOSE) {
         cancelKeyboardHold();
         const bool reentrant = activeUpdates.load() != 0;
         DestroyWindow(window);
         return reentrant ? 1 : 0;
     }
-    if (message == WM_NCDESTROY) { cancelKeyboardHold(); messageWindow.store(nullptr); return DefWindowProcW(window, message, w, l); }
+    if (message == WM_NCDESTROY) {
+        cancelKeyboardHold();
+        zoomBorder.close();
+        messageWindow.store(nullptr);
+        return DefWindowProcW(window, message, w, l);
+    }
     if (message == updateMessage) {
         if (stopping.load()) return 0;
         struct ActiveUpdate {
@@ -3934,6 +4380,8 @@ HWND WINAPI create(DWORD ex, LPCWSTR name, LPCWSTR title, DWORD flags, int x, in
 DWORD WINAPI worker(void* stopParameter) {
     const HANDLE localStop = static_cast<HANDLE>(stopParameter);
     LONG last = mapping.get()->appliedSequence, lastCommand = -1;
+    bool lastBorder = false;
+    HWND lastBorderTarget = nullptr;
     const HANDLE events[] = {localStop, mapping.wakeEvent()};
     for (;;) {
         const DWORD result = events[1] ? WaitForMultipleObjects(2, events, FALSE, 250) : WaitForSingleObject(localStop, 4);
@@ -3946,6 +4394,12 @@ DWORD WINAPI worker(void* stopParameter) {
         const LONG sequence = InterlockedCompareExchange(&state->requestedSequence, 0, 0);
         const LONG command = InterlockedCompareExchange(&state->syncRequest, 0, 0);
         const HWND target = messageWindow.load();
+        const bool border = wantsZoomBorder(*state, GetTickCount64());
+        if (target && (lastBorderTarget != target || lastBorder != border) &&
+            PostMessageW(target, kRefreshZoomBorder, FALSE, 0)) {
+            lastBorder = border;
+            lastBorderTarget = target;
+        }
         const bool shouldSuspend = !state->overviewBypassed && overviewAvailable() && state->controlEnabled && state->normalInOverview && (state->shellMask & 1) != 0 && (overviewSuspended.load() || !state->pendingGestures);
         if (target && (overviewAvailable() || overviewSuspended.load()) &&
             (state->shellApplied != state->shellRevision || shouldSuspend != overviewSuspended.load()))

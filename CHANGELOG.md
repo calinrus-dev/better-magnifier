@@ -1,5 +1,11 @@
 # Cambios
 
+## 0.8.0 — 2026-11-25 (experimental)
+
+- Clic izquierdo y derecho simultáneos para alternar el modo zoom. La rueda sola amplía o reduce mientras está activo. Se conservan el pellizco de tres dedos, Win+rueda y Win+«+»/«−», incluido el teclado numérico.
+- Marco rojo fino e independiente con exclusión de captura de Windows. La captura de una ventana comparte la aplicación sin el zoom del escritorio.
+- El lector reutiliza los búferes para los informes HID y evita asignaciones en el reconocedor de tres dedos.
+
 ## 0.7.5 — 2026-11-09 (experimental)
 
 Publicación que reúne las correcciones posteriores a 0.7.0. Las versiones intermedias no se publicaron como releases.

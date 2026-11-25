@@ -1,6 +1,14 @@
 # Validación
 
-Fecha de revisión: 9 de noviembre de 2026.
+Fecha de revisión: 25 de noviembre de 2026.
+
+## Estado de 0.8.0
+
+- 747 comprobaciones correctas y compilación x64 con `-Wall -Wextra -Werror`. Las pruebas del broker, del adaptador y del reconocimiento usan entradas simuladas.
+- En Windows 11 25H2 (26200.9711), una ventana de prueba conservó sus cuatro regiones de color, posición y tamaño tanto en Windows Graphics Capture por ventana como por monitor, al pasar del 100 % al 150 % con la Lupa nativa. GDI y Desktop Duplication (DXGI) capturaron el aumento en este equipo. En OBS, el método de Windows Graphics Capture permite compartir la imagen sin aplicar la ampliación local.
+- El marco solicita exclusión de captura al compositor antes de mostrarse. La disponibilidad del modo de zoom y la validación de captura dependen de que la Lupa esté en pantalla completa.
+- Instalación local 0.8.0 verificada por SHA-256 de fuente y DLL. El host y la Lupa respondieron READY, con hooks de ratón cargados. Durante el uso se observó la rueda activa y un aumento al 154,99 %. Queda pendiente una prueba física guiada del pellizco y del acorde de botones.
+- Con el modo activo, el compositor confirmó cuatro franjas visibles de 2 píxeles con afinidad de exclusión 0x11. El marco quedó fuera de los fotogramas de prueba de WGC (ventana y monitor) y DXGI (monitor).
 
 ## Estado de 0.7.5
 

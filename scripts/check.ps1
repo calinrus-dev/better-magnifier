@@ -49,7 +49,7 @@ Invoke-Compile 'core-tests' ($common + @((Join-Path $projectRoot 'tests\core_tes
 & $testExe
 if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas ($LASTEXITCODE)." }
 
-$links = @('-lhid', '-lwtsapi32', '-lshell32', '-luser32', '-ladvapi32', '-ldwmapi', '-lole32')
+$links = @('-lhid', '-lwtsapi32', '-lshell32', '-luser32', '-ladvapi32', '-ldwmapi', '-lole32', '-lgdi32')
 $hostExe = Join-Path $buildPath 'pinch-zoom-host.exe'
 Invoke-Compile 'host' ($common + @('-DPINCH_ZOOM_STANDALONE', '-municode', $source, '-o', $hostExe) + $links)
 Invoke-Compile 'mod' ($common + @('-shared', '-Wl,--export-all-symbols', '-DWH_MOD', ('-DWH_MOD_ID=L"' + $id + '"'),

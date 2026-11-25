@@ -58,7 +58,7 @@ try {
         }
         $source = Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8
         $version = [regex]::Match($source, '(?m)^// @version\s+(\S+)').Groups[1].Value
-        if ($version -notmatch '^0\.[34567]\.\d+$') { throw 'This installer is scoped to versions 0.3.x through 0.7.x.' }
+        if ($version -notmatch '^0\.[345678]\.\d+$') { throw 'This installer is scoped to versions 0.3.x through 0.8.x.' }
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
         if ($manifest.version -ne $version -or $manifest.sourceSha256 -ne (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash -or
             $manifest.dllSha256 -ne (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash) {
