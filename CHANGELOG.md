@@ -1,5 +1,18 @@
 # Cambios
 
+## 0.8.3 — 2026-11-26 (experimental)
+
+- El modo permanece encendido al terminar un pellizco mientras la vista siga ampliada y se apaga al volver al 100 %. El acorde manual conserva el nivel existente.
+- El instalador espera la descarga ordenada del mod anterior. Si Windhawk conserva la DLL cargada, revierte la selección anterior.
+- La Lupa se oculta cuando los dos componentes están listos. El marco usa un recurso estático de WARP y libera sus recursos después de que termine la actualización en curso.
+
+## 0.8.2 — 2026-11-25 (experimental)
+
+- El acorde izquierdo + derecho enciende o apaga el modo de ratón al nivel de ampliación actual. Con el modo activo, el clic central vuelve al 100 % y la rueda lateral desplaza el contenido verticalmente.
+- La rueda principal conserva todos los deltas y ajusta el objetivo desde el primer fotograma con una transición breve. El pellizco empieza desde la ampliación visible y cancela el movimiento pendiente de la rueda. La protección del puntero caduca si el touchpad pierde el informe de liberación.
+- DirectComposition compensa la transformación de pantalla con geometría fraccionaria para que el marco conserve cinco píxeles físicos incluso con ampliación alta.
+- Se acota el control a un host por sesión, se limpian las ventanas y el registro HID que pertenecen al mod, y las actualizaciones de visibilidad y ajustes se entregan al hilo que posee cada ventana.
+
 ## 0.8.0 — 2026-11-25 (experimental)
 
 - Clic izquierdo y derecho simultáneos para alternar el modo zoom. La rueda sola amplía o reduce mientras está activo. Se conservan el pellizco de tres dedos, Win+rueda y Win+«+»/«−», incluido el teclado numérico.

@@ -4,7 +4,7 @@ El proyecto se distribuye bajo GPL-3.0-or-later. Las correcciones y mejoras se p
 
 Incluye la compilación exacta de Windows, la versión de Windhawk, el modelo del touchpad y los pasos para reproducir un fallo. Distingue si ocurre al arrancar la Lupa desde cero, con ella abierta, al usar el teclado o al cambiar de modo. Evita adjuntar información personal o volcados completos del sistema.
 
-Para problemas con rueda, indica el modelo del ratón, si usas muescas o giro libre, el perfil de atajos y los ajustes de ganancia, transición y límites normal/rápido. Prueba por separado una muesca, un movimiento pequeño, un giro rápido con frenado y una inversión. No adjuntes capturas de entradas personales.
+Para problemas con rueda, indica el modelo del ratón, si usas muescas o giro libre, el perfil de atajos y el ajuste del paso de zoom y el sentido de cada rueda. Prueba por separado una muesca, un movimiento pequeño, un giro rápido con frenado y una inversión. No adjuntes capturas de entradas personales.
 
 El mod distribuible debe seguir siendo `mods/kde-pinch-zoom.wh.cpp`, autocontenido. No cambies la configuración de gestos de Windows ni sustituyas deslizamientos nativos por atajos simulados. Los hooks privados requieren confirmar su ABI y acotar las versiones compatibles antes de ampliar soporte.
 

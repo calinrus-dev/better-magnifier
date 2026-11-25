@@ -41,7 +41,11 @@ void nativeWheel(void*, int) { ++originalWheelCalls; }
 LRESULT CALLBACK windowBackend(HWND, UINT, WPARAM, LPARAM) { return 321; }
 LONG_PTR WINAPI existingObject(HWND, int index) { return index == GWLP_USERDATA ? 0x6789 : 0; }
 HRESULT keeper(void** result) { *result = reinterpret_cast<void*>(0x1000); return S_OK; }
-long optionValue(void*, int name) { return name == 14 ? percent : name == 20 ? 100 : name == 4 ? currentMode : 2; }
+void (*modeReadProbe)() = nullptr;
+long optionValue(void*, int name) {
+    if (name == 4 && modeReadProbe) std::exchange(modeReadProbe, nullptr)();
+    return name == 14 ? percent : name == 20 ? 100 : name == 4 ? currentMode : 2;
+}
 void cache(void*, int name, long value, bool save) {
     if (name == 14) percent = value;
     if (name == 4) currentMode = value;
@@ -78,14 +82,69 @@ int wmain() {
         ++checks;
     };
     {
+        using namespace magnifier;
+        const bool previous = hiding.load();
+        setHiding(!previous);
+        require(visibilityPending.load(), "visibility work waits for the UI helper");
+        const HWND target = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0,
+            HWND_MESSAGE, nullptr, GetModuleHandleW(nullptr), nullptr);
+        require(target != nullptr, "visibility test created a message-only window");
+        messageWindow.store(target);
+        queueVisibility();
+        MSG queued{};
+        require(!visibilityPending.load() &&
+            PeekMessageW(&queued, target, kRefreshNativeVisibility, kRefreshNativeVisibility, PM_REMOVE),
+            "new UI helper receives the pending visibility change");
+        setHiding(!previous);
+        require(!PeekMessageW(&queued, target, kRefreshNativeVisibility, kRefreshNativeVisibility, PM_REMOVE),
+            "unchanged visibility does not enqueue another UI message");
+
+        bridge::Record state{};
+        NativeMapping owner;
+        const auto pid = static_cast<LONG>(GetCurrentProcessId());
+        state.hideUi = 1;
+        state.controlEnabled = 1;
+        state.magnifierReady = 1;
+        state.nativeLevel = 10000;
+        state.nativeCaps = compatibility::NativeBootstrapWindows;
+        state.shellPid = pid;
+        state.magnifierPid = pid;
+        state.hostWindow = reinterpret_cast<LONG64>(target);
+        state.heartbeat = static_cast<LONG64>(GetTickCount64());
+        owner.useStagedTestRecord(&state);
+        require(!nativeUiShouldBeHidden(owner), "an unclaimed native process cannot hide the stock UI");
+        owner.useTestRecord(&state);
+        require(nativeUiShouldBeHidden(owner), "healthy owner and live host can hide the stock UI at 100 percent");
+        state.magnifierReady = 0;
+        require(!nativeUiShouldBeHidden(owner), "bootstrap capability cannot hide unready Magnifier");
+        state.magnifierReady = 1;
+        state.controlEnabled = 0;
+        require(!nativeUiShouldBeHidden(owner), "disabled Explorer control does not hide Magnifier");
+        state.controlEnabled = 1;
+        state.hideUi = 0;
+        require(!nativeUiShouldBeHidden(owner), "explicit visible UI setting wins");
+        state.hideUi = 1;
+        state.heartbeat = static_cast<LONG64>(GetTickCount64() - 251);
+        require(!nativeUiShouldBeHidden(owner), "expired Explorer heartbeat restores normal visibility");
+        state.heartbeat = static_cast<LONG64>(GetTickCount64());
+        state.shellPid = pid ^ 1;
+        require(!nativeUiShouldBeHidden(owner), "an Explorer window owned by a different PID cannot hide Magnifier");
+        state.shellPid = pid;
+        state.magnifierPid = pid ^ 1;
+        require(!nativeUiShouldBeHidden(owner), "a replaced native publisher cannot hide Magnifier");
+        DestroyWindow(target);
+        messageWindow.store(nullptr);
+        hiding.store(previous);
+    }
+    {
         const auto edges = runtime::ZoomBorder::edges(RECT{-1600, -200, 0, 700});
         constexpr std::array<RECT, 4> expected{{
-            {-1600, -200, 0, -198}, {-1600, 698, 0, 700},
-            {-1600, -198, -1598, 698}, {-2, -198, 0, 698}}};
-        require(EqualRect(&edges[0], &expected[0]), "top border uses two physical pixels");
-        require(EqualRect(&edges[1], &expected[1]), "bottom border spans to both corners");
-        require(EqualRect(&edges[2], &expected[2]), "left edge avoids overlapping top and bottom");
-        require(EqualRect(&edges[3], &expected[3]), "right edge supports negative monitor coordinates");
+            {-1600, -200, 0, -195}, {-1600, 695, 0, 700},
+            {-1600, -195, -1595, 695}, {-5, -195, 0, 695}}};
+        require(EqualRect(&edges[0].bounds, &expected[0]), "unzoomed top border uses five physical pixels");
+        require(EqualRect(&edges[1].bounds, &expected[1]), "bottom border spans to both corners");
+        require(EqualRect(&edges[2].bounds, &expected[2]), "left edge avoids overlapping top and bottom");
+        require(EqualRect(&edges[3].bounds, &expected[3]), "right edge supports negative monitor coordinates");
         bridge::Record border{};
         border.controlEnabled = 1; border.magnifierReady = 1;
         border.heartbeat = 2000; border.hostWindow = 1;
@@ -95,6 +154,37 @@ int wmain() {
         require(!magnifier::wantsZoomBorder(border, 2251), "expired host heartbeat removes the border");
         border.magnifierReady = 0;
         require(!magnifier::wantsZoomBorder(border, 2000), "unavailable native magnifier removes the border");
+    }
+    {
+        const auto checkFrame = [&](const RECT& screen, pinch::View view) {
+            const auto [left, top, right, bottom] = screen;
+            const std::array<RECT, 4> pixels{{
+                {left, top, right, top + 5}, {left, bottom - 5, right, bottom},
+                {left, top + 5, left + 5, bottom - 5}, {right - 5, top + 5, right, bottom - 5}}};
+            const auto edges = runtime::ZoomBorder::edges(screen, view);
+            for (std::size_t i = 0; i < edges.size(); ++i) {
+                const auto& edge = edges[i];
+                const auto& area = pixels[i];
+                const auto& matrix = edge.transform;
+                const double x = (edge.bounds.left - view.x + static_cast<double>(matrix._31)) * view.zoom;
+                const double y = (edge.bounds.top - view.y + static_cast<double>(matrix._32)) * view.zoom;
+                constexpr double epsilon = 0.001;
+                require(std::abs(x - area.left) < epsilon && std::abs(y - area.top) < epsilon &&
+                        std::abs(x + matrix._11 * view.zoom - area.right) < epsilon &&
+                        std::abs(y + matrix._22 * view.zoom - area.bottom) < epsilon,
+                        "fractional transforms keep all screen edges five physical pixels wide");
+                require(matrix._31 >= 0 && matrix._32 >= 0 &&
+                        matrix._31 + matrix._11 <= edge.bounds.right - edge.bounds.left + epsilon &&
+                        matrix._32 + matrix._22 <= edge.bounds.bottom - edge.bounds.top + epsilon,
+                        "the native strip keeps the entire fractional visual in its client bounds");
+            }
+        };
+        const RECT primary{0, 0, 2559, 1439};
+        const RECT secondary{-1600, -173, 0, 727};
+        for (double scale : {1.125, 1.5, 1.8, 2.0, 3.75, 7.25, 8.0, 16.0}) {
+            checkFrame(primary, {scale, 426, 241});
+            checkFrame(secondary, {scale, -351, -74});
+        }
     }
     magnifier::mapping.useTestRecord(&state);
     magnifier::messageWindow.store(reinterpret_cast<HWND>(0x5678));
@@ -173,10 +263,17 @@ int wmain() {
     deliver(18000, 12);
     require(uiCalls == 4 && directWrites == 4, "shutdown rejects later native messages");
     magnifier::stopping.store(false);
+    state.enabled = 1;
+    state.down = 1;
+    state.phase = static_cast<LONG>(pinch::Phase::Pinch);
+    state.heartbeat = static_cast<LONG64>(GetTickCount64());
+    state.pinchFrameTime = state.heartbeat;
     magnifier::applyingPinch = true;
+    magnifier::applyingTouchpadPinch = true;
     magnifier::moveMouse(nullptr, POINT{10, 20});
     require(cursorWarps == 1, "synchronous pinch omits Magnifier cursor injection");
     magnifier::applyingPinch = false;
+    magnifier::applyingTouchpadPinch = false;
     state.enabled = 1;
     state.down = 1;
     state.phase = static_cast<LONG>(pinch::Phase::Pinch);
@@ -197,6 +294,14 @@ int wmain() {
     magnifier::moveMouse(nullptr, POINT{10, 20});
     require(cursorWarps == 5, "a stale host cannot block native pointer behavior");
     state.heartbeat = static_cast<LONG64>(GetTickCount64());
+    state.pinchFrameTime = state.heartbeat - pinch::kPinchFrameTimeoutMs - 1;
+    require(!magnifier::holdPointer(), "a live host with no recent pinch frame cannot interfere with pointer follow");
+    magnifier::applyingPinch = true;
+    magnifier::applyingTouchpadPinch = true;
+    require(!magnifier::holdPointer(), "late pinch updates cannot restart pointer protection after a missing lift");
+    magnifier::applyingPinch = false;
+    magnifier::applyingTouchpadPinch = false;
+    state.pinchFrameTime = state.heartbeat;
     magnifier::keepPointerStable.store(false);
     magnifier::moveMouse(nullptr, POINT{10, 20});
     require(cursorWarps == 6, "pointer protection can be disabled independently");
@@ -271,13 +376,20 @@ int wmain() {
     magnifier::updateOverview();
     require(directWrites == beforeAmbiguous, "cancelling a provisional pinch leaves the global view untouched");
     magnifier::keepPointerStable.store(true);
+    state.enabled = 1;
+    state.down = 1;
+    state.phase = static_cast<LONG>(pinch::Phase::Pinch);
+    state.heartbeat = static_cast<LONG64>(GetTickCount64());
+    state.pinchFrameTime = state.heartbeat;
     magnifier::applyingPinch = true;
+    magnifier::applyingTouchpadPinch = true;
     const int releasesBefore = clipReleases;
     RECT limiting{1, 2, 3, 4};
     magnifier::clipCursor(&limiting);
     require(clipLimits == 0 && clipReleases == releasesBefore + 1,
             "slow pinch clipping cannot nudge the pointer into shrinking bounds");
     magnifier::applyingPinch = false;
+    magnifier::applyingTouchpadPinch = false;
     state.enabled = 1;
     state.down = 1;
     state.phase = static_cast<LONG>(pinch::Phase::Pinch);
@@ -309,11 +421,11 @@ int wmain() {
     state.winWheel = 0; state.wheelWindowSwitch = 0;
     state.enabled = 0;
     magnifier::wheel(nullptr, 30);
-    require(pinch::wheelDelta(state.wheelPacket) == 30 && originalWheelCalls == 0,
-            "mouse-only wheel input works after reset and discards the previous queue direction");
+    require(pinch::wheelDelta(state.wheelPacket) == 0 && originalWheelCalls == 0,
+            "opposite native wheel deltas cancel before their render frame without duplicating zoom");
     state.enabled = 1; state.wheelEnabled = 0;
     magnifier::wheel(nullptr, 120);
-    require(originalWheelCalls == 1 && pinch::wheelDelta(state.wheelPacket) == 30, "wheel opt-out restores native shortcut behavior");
+    require(originalWheelCalls == 1 && pinch::wheelDelta(state.wheelPacket) == 0, "wheel opt-out restores native shortcut behavior");
     state.wheelEnabled = 1; state.hostWindow = 0;
     magnifier::wheel(nullptr, 120);
     require(originalWheelCalls == 2, "an absent host window preserves native behavior");
@@ -329,11 +441,16 @@ int wmain() {
     state.wheelActive = 1; state.down = 0;
     const int warpsBeforeWheel = cursorWarps, clipsBeforeWheel = clipLimits;
     magnifier::moveMouse(nullptr, POINT{10, 20}); magnifier::clipCursor(&limiting);
-    require(cursorWarps == warpsBeforeWheel && clipLimits == clipsBeforeWheel,
-            "deferred pointer warps and clipping are suppressed between wheel animation ticks");
+    require(cursorWarps == warpsBeforeWheel + 1 && clipLimits == clipsBeforeWheel + 1,
+            "pending wheel zoom preserves current native pointer movements and clipping");
+    magnifier::applyingPinch = true; // Internal apply, but not a physical pinch.
+    magnifier::moveMouse(nullptr, POINT{10, 20}); magnifier::clipCursor(&limiting);
+    magnifier::applyingPinch = false;
+    require(cursorWarps == warpsBeforeWheel + 2 && clipLimits == clipsBeforeWheel + 2,
+            "the internal wheel renderer follows the pointer without inheriting pinch protection");
     const LONG beforeWheelKey = state.inputRevision;
     magnifier::zoomCommand(reinterpret_cast<void*>(0x1000), 0x800A);
-    require(state.inputRevision != beforeWheelKey && !state.wheelActive && cursorWarps == warpsBeforeWheel + 1,
+    require(state.inputRevision != beforeWheelKey && !state.wheelActive && cursorWarps == warpsBeforeWheel + 3,
             "native keyboard cancels pending wheel epoch and retains native pointer behavior");
     const LONG beforeExternal = state.inputRevision;
     const LONG beforeNativeTarget = state.nativeLevel;
@@ -372,9 +489,9 @@ int wmain() {
     state.requestSource = static_cast<LONG>(bridge::InputSource::None);
     InterlockedExchange64(&state.wheelPacket, 0);
     for (int i=0; i<10000; ++i) bridge::enqueueWheel(&state, 1, state.inputRevision, 1000);
-    require(pinch::wheelDelta(state.wheelPacket) == 1200, "producer burst remains bounded without posting a message per delta");
+    require(pinch::wheelDelta(state.wheelPacket) == 10000, "producer burst preserves all fine deltas without posting per input");
     bridge::enqueueWheel(&state, -1, state.inputRevision, 1001);
-    require(pinch::wheelDelta(state.wheelPacket) == -1, "producer reversal discards its old accumulated direction");
+    require(pinch::wheelDelta(state.wheelPacket) == 9999, "producer reversal keeps the net signed motion");
     const auto queued = state.wheelPacket;
     bridge::enqueueWheel(&state, 120, state.inputRevision - 1, 1002);
     require(state.wheelPacket == queued, "stale producer revision cannot enter the mailbox");
@@ -441,9 +558,11 @@ int wmain() {
     magnifier::change(reinterpret_cast<void*>(0x2000), 2.5f, nullptr);
     require(visibleView.zoom == 1 && directWrites == 1 && cursorWarps == warpsBeforeDeferredReset,
             "a deferred reset's previous wheel animation cannot magnify again or warp the pointer");
+    const int releasesBeforeWheel = clipReleases;
     deliver(12510, 700, bridge::InputSource::Wheel);
     require(state.nativeLevel == 12510 && std::abs(visibleView.zoom - 1.251) < 0.00001 && state.appliedSequence == 700,
             "fresh wheel input can start zooming normally after a deferred-renderer reset");
+    require(clipReleases == releasesBeforeWheel, "wheel zoom does not release native pointer bounds");
 
     prepareCold();
     state.nativeCaps = compatibility::NativeCore | compatibility::NativeKeyboardObserver;
@@ -788,6 +907,51 @@ int wmain() {
         magnifier::mapping.useTestRecord(&state);
         magnifier::stopping.store(false); magnifier::afterInitComplete.store(false); magnifier::ownerWorkerStarted.store(false);
         magnifier::available = false;
+    }
+    {
+        const auto renderer = reinterpret_cast<void*>(0x2000);
+        magnifier::nativeUi.store(reinterpret_cast<void*>(0x1000));
+        magnifier::nativeSelf.store(renderer);
+        magnifier::messageWindow.store(reinterpret_cast<HWND>(0x1234));
+        magnifier::uiThread.store(GetCurrentThreadId());
+        magnifier::rendererThread.store(GetCurrentThreadId());
+        magnifier::trackingInitialized.store(true);
+        magnifier::uiPrimeBlocked.store(false);
+        state.controlEnabled = 1; state.nativeCaps = compatibility::NativeCore | compatibility::NativeKeyboardObserver;
+        state.maxZoomPercent = 1600; state.nativeLevel = 20000;
+        state.appliedSequence = 900; state.inputRevision = 130; state.zoomRevision = 140;
+        state.pendingCommand = 0; state.down = 0; currentMode = 2; visibleView = {2, 0, 0};
+        magnifier::acceptManagedTarget(bridge::InputSource::Wheel, 2);
+        const int writesBefore = directWrites;
+        modeReadProbe = [] {
+            state.requestWriting = 1;
+            state.down = 1; state.phase = static_cast<LONG>(pinch::Phase::Pinch);
+            InterlockedIncrement(&state.inputRevision);
+            state.requestInputRevision = state.inputRevision;
+            state.requestRevision = state.zoomRevision;
+            state.requestSource = static_cast<LONG>(bridge::InputSource::Pinch);
+            state.requestedLevel = 21500;
+            InterlockedIncrement(&state.requestedSequence);
+            state.requestWriting = 0;
+        };
+        deliver(33000, 901, bridge::InputSource::Wheel);
+        require(directWrites == writesBefore && state.appliedSequence == 900 && state.requestedSequence == 902,
+                "a pinch superseding the IPC wheel request during a native query cannot render or acknowledge a mixed request");
+        magnifier::change(renderer, 3.3f, nullptr);
+        require(directWrites == writesBefore && visibleView.zoom == 2,
+                "the previous wheel animation cannot jump the view between pinch classification and its first native request");
+        magnifier::messages(nullptr, magnifier::updateMessage, 0, 0);
+        require(directWrites == writesBefore + 1 && state.appliedSequence == 902 && state.nativeLevel == 21500 &&
+                state.currentSource == static_cast<LONG>(bridge::InputSource::Pinch),
+                "the surviving pinch request applies once with the newest input epoch and source");
+        state.requestWriting = 1;
+        deliver(23000, 903);
+        require(state.appliedSequence == 902 && state.nativeLevel == 21500,
+                "the native reader never consumes partially published request fields");
+        state.requestWriting = 0;
+        magnifier::messages(nullptr, magnifier::updateMessage, 0, 0);
+        require(state.appliedSequence == 903 && state.nativeLevel == 23000,
+                "the committed request is delivered when its producer finishes publishing it");
     }
     std::cout << checks << " native adapter checks passed; fake backend; desktop unchanged\n";
 }

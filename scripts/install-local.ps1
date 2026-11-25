@@ -2,7 +2,6 @@
 param(
     [switch]$Disable,
     [ValidateRange(1,100)][Nullable[int]]$WheelStep,
-    [ValidateRange(0,2000)][Nullable[int]]$WheelFreeSpinMaxRate,
     [ValidateRange(0,150)][Nullable[int]]$Acceleration,
     [ValidateRange(0,409600)][Nullable[int]]$MaximumZoom
 )
@@ -19,6 +18,7 @@ $previousSettings = $null
 $previousSource = $null
 $sourceDestination = $null
 $modified = $false
+$sourceChanged = $false
 $legacyKey = $null
 $legacyDisabled = $null
 function Save-Values($RegistryKey) {
@@ -30,9 +30,37 @@ function Save-Values($RegistryKey) {
     }
     return $saved
 }
-function Restore-Values($RegistryKey, $Saved) {
-    foreach ($name in $RegistryKey.GetValueNames()) { if (-not $Saved.ContainsKey($name)) { $RegistryKey.DeleteValue($name, $false) } }
-    foreach ($name in $Saved.Keys) { $RegistryKey.SetValue($name, $Saved[$name].Value, $Saved[$name].Kind) }
+function Restore-Values($RegistryKey, $Saved, [string]$Skip = $null) {
+    foreach ($name in $RegistryKey.GetValueNames()) {
+        if ((!$Skip -or $name -ne $Skip) -and -not $Saved.ContainsKey($name)) { $RegistryKey.DeleteValue($name, $false) }
+    }
+    foreach ($name in $Saved.Keys) {
+        if (!$Skip -or $name -ne $Skip) { $RegistryKey.SetValue($name, $Saved[$name].Value, $Saved[$name].Kind) }
+    }
+}
+function Get-LoadedModLibraries([int]$Session) {
+    $processes = Get-Process -Name explorer,Magnify -ErrorAction SilentlyContinue
+    foreach ($process in $processes) {
+        try {
+            if ($process.SessionId -ne $Session) { continue }
+            foreach ($module in $process.Modules) {
+                if ($module.ModuleName -like ($modId + '_*.dll')) { $module.ModuleName }
+            }
+        } catch {
+            if (-not $process.HasExited) { throw }
+        } finally {
+            $process.Dispose()
+        }
+    }
+}
+function Wait-PreviousModUnloaded([int]$Session, [string]$NewLibrary) {
+    $timeout = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $remaining = @(Get-LoadedModLibraries $Session | Where-Object { $_ -ne $NewLibrary })
+        if ($remaining.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 180
+    } while ($timeout.Elapsed.TotalSeconds -lt 8)
+    throw 'Windhawk still has the previous DLL loaded. The installation was interrupted before switching versions.'
 }
 try {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -51,9 +79,8 @@ try {
     } else {
         $sourcePath = Join-Path $projectRoot 'mods\kde-pinch-zoom.wh.cpp'
         $dllPath = Join-Path $projectRoot 'build\kde-pinch-zoom.dll'
-        $hostPath = Join-Path $projectRoot 'build\pinch-zoom-host.exe'
         $manifestPath = Join-Path $projectRoot 'build\build-info.json'
-        foreach ($path in @($sourcePath, $dllPath, $hostPath, $manifestPath)) {
+        foreach ($path in @($sourcePath, $dllPath, $manifestPath)) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing file: $path. Run scripts/check.ps1 first." }
         }
         $source = Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8
@@ -83,12 +110,24 @@ try {
         }
         $sourceDestination = Join-Path $sourcesPath ($modId + '.wh.cpp')
         if (Test-Path -LiteralPath $sourceDestination) { $previousSource = [IO.File]::ReadAllBytes($sourceDestination) }
-        # Disable only this mod while updating its files and configuration.
+        $installedDll = Join-Path $modsPath $libraryName
+        if (-not (Test-Path -LiteralPath $installedDll -PathType Leaf)) {
+            Copy-Item -LiteralPath $dllPath -Destination $installedDll
+        }
+        if ((Get-FileHash -LiteralPath $installedDll -Algorithm SHA256).Hash -ne $manifest.dllSha256) {
+            throw 'The destination DLL does not match the checked build.'
+        }
+        $session = (Get-Process -Id $PID).SessionId
+        $olderLibraries = @(Get-LoadedModLibraries $session | Where-Object { $_ -ne $libraryName })
         $key = $machine.CreateSubKey($registryPath, $true)
         $modified = $true
-        $key.SetValue('Disabled', 1, 'DWord')
-        $key.Flush()
-        Copy-Item -LiteralPath $dllPath -Destination (Join-Path $modsPath $libraryName) -Force
+        if ($olderLibraries.Count -gt 0 -or $key.GetValue('LibraryFileName', '') -ne $libraryName) {
+            # Let Windhawk finish unloading both roles before exposing new IPC.
+            $key.SetValue('Disabled', 1, 'DWord')
+            $key.Flush()
+            if ($olderLibraries.Count -gt 0) { Wait-PreviousModUnloaded $session $libraryName }
+        }
+        $sourceChanged = $true
         Copy-Item -LiteralPath $sourcePath -Destination $sourceDestination -Force
         $key.SetValue('LibraryFileName', $libraryName, 'String')
         $key.SetValue('Architecture', 'amd64', 'String')
@@ -101,7 +140,7 @@ try {
         $settings = $key.CreateSubKey('Settings', $true)
         try {
             $defaults = @{enabled=1; observeOnly=0; sensitivity=100; acceleration=35; invertPinch=0; threshold=3;
-                maxZoom=0; suppressStartupFeedback=1; smoothWheel=1; winWheel=1; wheelWindowSwitch=1; windowButtons=0; disableReading=1; wheelStep=50; wheelDuration=100; wheelMaxRate=400; wheelFreeSpinMaxRate=1000; instantHorizontalSwitch=1; normalZoomInOverview=1; keyboardInterop=1; keyboardStep=0; keyboardHoldMultiplier=2; hideMagnifier=1; keepPointerStable=1; mouseFollow='edges'; edgeMargin=12;
+                maxZoom=0; suppressStartupFeedback=1; smoothWheel=1; winWheel=1; wheelWindowSwitch=1; windowButtons=0; disableReading=1; wheelStep=20; instantHorizontalSwitch=1; normalZoomInOverview=1; keyboardInterop=1; keyboardStep=0; keyboardHoldMultiplier=2; hideMagnifier=1; keepPointerStable=1; mouseFollow='edges'; edgeMargin=12;
                 smoothing=0; fallbackHeight=60; debugLogging=0}
             foreach ($name in $defaults.Keys) {
                 if ($null -eq $settings.GetValue($name, $null)) {
@@ -110,7 +149,6 @@ try {
                 }
             }
             if ($null -ne $WheelStep) { $settings.SetValue('wheelStep', [int]$WheelStep, 'DWord') }
-            if ($null -ne $WheelFreeSpinMaxRate) { $settings.SetValue('wheelFreeSpinMaxRate', [int]$WheelFreeSpinMaxRate, 'DWord') }
             if ($null -ne $Acceleration) { $settings.SetValue('acceleration', [int]$Acceleration, 'DWord') }
             if ($null -ne $MaximumZoom) { $settings.SetValue('maxZoom', [int]$MaximumZoom, 'DWord') }
         } finally { $settings.Close() }
@@ -122,32 +160,40 @@ try {
             $legacyKey.SetValue('Disabled', 1, 'DWord')
             $legacyKey.Flush()
         }
-        # Restart the native app cleanly after replacing the old window-hiding hook.
-        $session = (Get-Process -Id $PID).SessionId
-        Get-Process -Name Magnify -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $session } | ForEach-Object {
-            $nativeId = $_.Id
-            try { Stop-Process -Id $nativeId -ErrorAction Stop }
-            catch { if (Get-Process -Id $nativeId -ErrorAction SilentlyContinue) { throw } }
-        }
-        & $hostPath --reset
-        if ($LASTEXITCODE -ne 0) { throw 'Could not restore the desktop to 100% before enabling the mod.' }
         $key.SetValue('Disabled', 0, 'DWord')
         $key.Flush()
         $result.success = $true
-        $result.message = "Installed local@kde-pinch-zoom $version with native Magnifier integration."
+        $result.message = "Configured local@kde-pinch-zoom $version. Windhawk manages loading Explorer and Magnifier."
         $result.library = $libraryName
     }
 } catch {
     $result.message = $_.Exception.Message
     if ($modified -and $key) {
         try {
+            $key.SetValue('Disabled', 1, 'DWord')
+            $key.Flush()
             if ($null -ne $previous) {
-                Restore-Values $key $previous
+                Restore-Values $key $previous 'Disabled'
                 $restoreSettings = $key.CreateSubKey('Settings', $true)
                 try { Restore-Values $restoreSettings $previousSettings } finally { $restoreSettings.Close() }
-                if ($previousSource) { [IO.File]::WriteAllBytes($sourceDestination, $previousSource) }
-            } else { $key.SetValue('Disabled', 1, 'DWord') }
-            if ($legacyKey -and $null -ne $legacyDisabled) { $legacyKey.SetValue('Disabled', $legacyDisabled, 'DWord') }
+            }
+            if ($sourceChanged) {
+                if ($null -ne $previousSource) {
+                    [IO.File]::WriteAllBytes($sourceDestination, $previousSource)
+                } elseif (Test-Path -LiteralPath $sourceDestination -PathType Leaf) {
+                    Remove-Item -LiteralPath $sourceDestination
+                }
+            }
+            if ($legacyKey -and $null -ne $legacyDisabled) {
+                $legacyKey.SetValue('Disabled', $legacyDisabled, 'DWord')
+                $legacyKey.Flush()
+            }
+            if ($null -ne $previous) {
+                if ($previous.ContainsKey('Disabled')) {
+                    $key.SetValue('Disabled', $previous['Disabled'].Value, $previous['Disabled'].Kind)
+                } else { $key.DeleteValue('Disabled', $false) }
+            }
+            $key.Flush()
             $result.rollback = 'Restored the previous mod configuration.'
         } catch { $result.rollback = $_.Exception.Message }
     }

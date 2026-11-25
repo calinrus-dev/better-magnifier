@@ -1,6 +1,20 @@
 # Validación
 
-Fecha de revisión: 25 de noviembre de 2026.
+Fecha de revisión: 26 de noviembre de 2026.
+
+## Estado de 0.8.3
+
+- 921 comprobaciones correctas con Windhawk x64. Se cubren el modo por encima del 100 % tras soltar los dedos, el retorno a tamaño normal, los atajos numéricos y el relevo entre rueda, pellizco y teclado.
+- Se comprobó el arranque de la 0.8.2 después de un reinicio, con el host y la Lupa listos al 100 %. Windows registró un apagado inesperado sin código de parada asociado.
+- Se probó con procesos simulados que el instalador espera a que salga la DLL anterior y abandona el intento cuando sigue cargada. El script carece de llamadas a reinicio o terminación de procesos.
+- Un host de prueba oculto creó las cuatro franjas con WARP y afinidad de exclusión. Probó el cierre reentrante, la recuperación al volver a activar el modo y la reutilización del recurso durante cambios de escala.
+
+## Estado de 0.8.2
+
+- 904 comprobaciones correctas y compilación x64 con advertencias tratadas como errores. Se probaron el cambio de modo sin variar el factor, los deltas fraccionarios, la interpolación de 32 ms, la inversión, el clic central y la conversión de rueda lateral. Se verificó el relevo entre rueda y pellizco, incluidas solicitudes pendientes y la ausencia del informe de liberación, con endpoints simulados.
+- Se consultó en solo lectura el perfil Keychron M6 de CachyOS. En KWin 6.8.3 la rueda principal usa un factor de 1,2 y la lateral actúa como desplazamiento vertical durante ese modo.
+- Una prueba DirectComposition midió cinco píxeles físicos de rojo saturado en GDI y Desktop Duplication al 100 %, 800 % y 1600 %. La comprobación óptica usó una franja temporal y restauró la vista inicial. El renderizador de producción verificó exclusión de captura en sus cuatro franjas en una prueba aparte.
+- El servicio Windhawk estaba configurado en inicio automático y ejecutándose. Las comprobaciones de inicio y descarga cubren la propiedad del controlador, los recursos del adaptador y la mensajería. Queda pendiente un reinicio completo de Windows.
 
 ## Estado de 0.8.0
 

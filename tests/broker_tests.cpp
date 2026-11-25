@@ -17,6 +17,7 @@ std::vector<UINT> sendResults;
 std::size_t nextSendResult = 0;
 std::vector<Posted> posts;
 unsigned passed = 0, keyReads = 0;
+unsigned wheelWakes = 0;
 struct ReleaseMask { BYTE key; BYTE scan; DWORD flags; ULONG_PTR tag; unsigned passedBefore; };
 std::vector<ReleaseMask> releaseMasks;
 void WINAPI keyEvent(BYTE key, BYTE scan, DWORD flags, ULONG_PTR tag) {
@@ -37,6 +38,7 @@ UINT WINAPI sendInput(UINT count, LPINPUT input, int size) {
 }
 BOOL WINAPI post(HWND target, UINT message, WPARAM w, LPARAM l) {
     if (!postSuccess) return FALSE;
+    if (message == runtime::kWheelMessage) { ++wheelWakes; return TRUE; }
     posts.push_back({target, message, w, l}); return TRUE;
 }
 LRESULT WINAPI next(HHOOK, int, WPARAM, LPARAM) { ++passed; return kPassed; }
@@ -57,6 +59,16 @@ struct InputBrokerTestAccess {
     }
     static void flushResync(MouseInputBroker& broker) { broker.consumeResync(); }
     static void expireChord(MouseInputBroker& broker) { broker.replayButton(); }
+    static bool runWithControllerAlreadyStopping(MouseInputBroker& broker) {
+        broker.ready_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        broker.stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        broker.controllerStop_ = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+        const bool eventsReady = broker.ready_ && broker.stop_ && broker.controllerStop_;
+        if (eventsReady) MouseInputBroker::run(&broker);
+        if (broker.controllerStop_) CloseHandle(std::exchange(broker.controllerStop_, nullptr));
+        broker.stop();
+        return eventsReady && !broker.installed_.load() && !broker.pendingButton_;
+    }
     static void detach(MouseInputBroker& broker) { if (MouseInputBroker::owner_ == &broker) MouseInputBroker::owner_ = nullptr; }
     static LRESULT key(unsigned vk, bool down, bool injected = false, int code = HC_ACTION) {
         KBDLLHOOKSTRUCT event{}; event.vkCode = vk;
@@ -85,7 +97,7 @@ struct BrokerFixture {
     pinch::Config config;
     BrokerFixture() {
         keys.fill(false); releaseMasks.clear(); sends.clear(); sendResults.clear(); nextSendResult = 0; posts.clear(); passed = 0; postSuccess = true;
-        timerAvailable = true; timers = cancelledTimers = 0;
+        timerAvailable = true; timers = cancelledTimers = wheelWakes = 0;
         record.nativeCaps = compatibility::NativeCore | compatibility::NativeWheel;
         record.magnifierReady = 1; record.nativeViewMode = 2;
         record.hostWindow = 0x1234; record.controlEnabled = 1; record.wheelEnabled = 1; record.inputRevision = 17;
@@ -121,15 +133,15 @@ int wmain() {
     {
         BrokerFixture f;
         require(f.key(VK_LWIN, true) == kPassed, "Win down remains native");
-        require(f.mouse(WM_MOUSEWHEEL, 1) == 1 && f.wheel() == 1 && f.record.wheelEvents == 1,
-                "Win wheel captures one precise unit in the bounded zoom mailbox");
+        require(f.mouse(WM_MOUSEWHEEL, 1) == 1 && f.wheel() == 1 && f.record.wheelEvents == 1 && wheelWakes == 1,
+                "first Win wheel captures one precise unit and wakes the host immediately");
         require(sends.size() == 1 && neutralMask(sends[0]), "a consumed first Win mouse action sends only a tagged neutral down/up pair");
         require(f.mouse(WM_MOUSEWHEEL, 30) == 1 && f.wheel() == 31 && sends.size() == 1,
                 "later high-resolution deltas do not repeatedly inject a menu mask");
         require(f.key(VK_LWIN, false) == kPassed, "Win up remains native after mouse zoom");
         f.key(VK_RWIN, true);
-        require(f.mouse(WM_MOUSEWHEEL, -1) == 1 && f.wheel() == -1 && sends.size() == 2,
-                "RWin opens an independent mouse session and reverses old wheel debt");
+        require(f.mouse(WM_MOUSEWHEEL, -1) == 1 && f.wheel() == 30 && sends.size() == 2,
+                "RWin opens an independent modifier session while wheel units combine with their signs");
     }
     for (unsigned key : {static_cast<unsigned>(0x53), static_cast<unsigned>(VK_SPACE), static_cast<unsigned>(VK_ADD), static_cast<unsigned>(VK_OEM_PLUS)}) {
         BrokerFixture f;
@@ -311,24 +323,85 @@ int wmain() {
         require(f.mouse(WM_MOUSEWHEEL, 1) == 1 && f.wheel() == 1 && !keyReads && sends.empty(),
                 "an active mode consumes fractional wheel deltas without consulting modifier APIs");
         f.record.down = 1; f.record.phase = static_cast<LONG>(pinch::Phase::Pinch);
-        require(f.mouse(WM_MOUSEWHEEL, 30) == kPassed && f.wheel() == 1,
-                "the active three-finger pinch keeps its own input and doesn't swallow wheel entries it can't apply");
+        require(f.mouse(WM_MOUSEWHEEL, 30) == 1 && f.wheel() == 31,
+                "live pinch wheel input joins the zoom packet without leaking ordinary scroll");
         f.record.down = 0; f.record.magnifierReady = 0;
-        require(f.mouse(WM_MOUSEWHEEL, -120) == kPassed && f.wheel() == 1,
+        require(f.mouse(WM_MOUSEWHEEL, -120) == kPassed && f.wheel() == 31,
                 "a stale mode flag cannot steal ordinary scrolling after the magnifier closes");
         f.record.magnifierReady = 1; f.key(VK_LWIN, true);
         require(f.key(VK_ESCAPE, true) == kPassed && f.key(VK_ESCAPE, true) == kPassed &&
                 posts.size() == 1 && posts[0].w == runtime::kExitZoomAction,
                 "Win+Escape stays native while noticing one exit at its first down");
         f.key(VK_ESCAPE, false); f.key(VK_LWIN, false);
-        require(f.mouse(WM_MOUSEWHEEL, -120) == kPassed && f.wheel() == 1,
+        require(f.mouse(WM_MOUSEWHEEL, -120) == kPassed && f.wheel() == 31,
                 "Win+Escape immediately restores ordinary wheel handling even before the host processes its message");
+    }
+    {
+        BrokerFixture f;
+        f.record.down = 1; f.record.phase = static_cast<LONG>(pinch::Phase::Pinch);
+        f.record.pinchFrameTime = static_cast<LONG64>(GetTickCount64());
+        require(f.mouse(WM_MOUSEWHEEL, 30) == 1 && f.wheel() == 30,
+                "a fresh live pinch accepts wheel input before any manual latch");
+        f.record.pinchFrameTime = 1;
+        require(f.mouse(WM_MOUSEWHEEL, 30) == kPassed && f.wheel() == 30,
+                "a lost stale touchpad stream cannot keep capturing scroll on its own");
+    }
+    {
+        BrokerFixture f;
+        f.broker.setPlainWheel(true);
+        f.key('A', true);
+        require(f.mouse(WM_MOUSEWHEEL, -30) == 1 && f.wheel() == -30,
+                "a non-modifier key held while armed cannot leak the vertical wheel into menus");
+        f.key(VK_LSHIFT, true);
+        require(f.mouse(WM_MOUSEWHEEL, 120) == kPassed && f.wheel() == -30,
+                "an actual modifier still preserves its native scrolling shortcut");
+    }
+    {
+        BrokerFixture f;
+        require(f.mouse(WM_MOUSEHWHEEL, -30) == kPassed && sends.empty(),
+                "the side wheel remains horizontal while the mode is off");
+        f.broker.setPlainWheel(true);
+        for (int delta : {-30, 75}) {
+            require(f.mouse(WM_MOUSEHWHEEL, delta) == 1 && !f.wheel(), "armed side-wheel movement is converted without entering zoom");
+            require(sends.back().inputs.size() == 1, "each horizontal delta generates one vertical mouse event");
+            const auto& scroll = sends.back().inputs.front();
+            require(scroll.type == INPUT_MOUSE && scroll.mi.dwFlags == MOUSEEVENTF_WHEEL && scroll.mi.dwExtraInfo &&
+                    static_cast<int>(scroll.mi.mouseData) == -delta,
+                    "side wheel matches the configured left-up and right-down mapping");
+            require(f.mouse(WM_MOUSEWHEEL, -delta, true) == kPassed && !f.wheel(),
+                    "the injected vertical scroll reaches Windows without recursive zoom");
+        }
+        sendResults = {0};
+        require(f.mouse(WM_MOUSEHWHEEL, 30) == kPassed && !f.wheel(),
+                "rejected scroll injection falls back to the original horizontal input");
+        f.key(VK_LWIN, true);
+        require(f.mouse(WM_MOUSEHWHEEL, 30) == kPassed && sends.size() == 3,
+                "horizontal modifier shortcuts continue to reach Windows");
+    }
+    {
+        BrokerFixture f;
+        require(f.mouse(WM_MBUTTONDOWN) == kPassed && f.mouse(WM_MBUTTONUP) == kPassed && posts.empty(),
+                "middle button remains an ordinary click while the manual zoom mode is off");
+        f.broker.setPlainWheel(true);
+        require(f.mouse(WM_MBUTTONDOWN) == 1 && f.mouse(WM_MBUTTONUP) == 1 && posts.size() == 1 &&
+                posts[0].w == runtime::kResetArmedZoomAction, "armed middle button posts one keep-mode reset and owns the matching up");
+        require(f.mouse(WM_MOUSEWHEEL, 1) == 1 && f.wheel() == 1, "armed middle click does not disable the wheel");
+        f.key(VK_LWIN, true);
+        require(f.mouse(WM_MBUTTONDOWN) == 1 && f.mouse(WM_MBUTTONUP) == 1 && posts.size() == 2 && posts[1].w == 1,
+                "the modified middle-button reset retains its original action");
     }
     {
         BrokerFixture f; sendResults = {1, 0};
         require(f.mouse(WM_LBUTTONDOWN) == 1 && f.mouse(WM_LBUTTONUP) == kPassed &&
                 sends.size() == 2 && sends[1].inputs[0].mi.dwFlags == MOUSEEVENTF_LEFTUP,
                 "if a short replay sends only down, a failed up retry leaves the physical up available");
+    }
+    {
+        BrokerFixture f;
+        require(f.mouse(WM_LBUTTONDOWN) == 1 && sends.empty(), "a deferred click is pending before shutdown");
+        require(runtime::InputBrokerTestAccess::runWithControllerAlreadyStopping(f.broker) &&
+                cancelledTimers == 1 && sends.empty() && !f.record.mouseHooksReady,
+                "controller shutdown discards the pending click without SendInput or installing global hooks");
     }
     {
         BrokerFixture f; f.key(VK_LWIN, true); keys[0xe8] = true;

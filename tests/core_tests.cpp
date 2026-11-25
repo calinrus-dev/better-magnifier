@@ -385,45 +385,75 @@ int main() {
     });
     test("wheel retains high resolution deltas proportionally", [] {
         pinch::WheelMotion a, b;
-        a.add(120, 2, 0, 15, 100, 16);
-        for (int i = 0; i < 4; ++i) b.add(30, 2, 0, 15, 100, 16);
+        a.add(120, 2, 15, 16);
+        for (int i = 0; i < 120; ++i) b.add(1, 2, 15, 16);
         near(a.goal(), b.goal()); near(a.goal(), 2.3);
     });
-    test("wheel publishes decimal intermediate frames and finishes", [] {
-        pinch::WheelMotion w; w.add(120, 1, 10, 15, 100, 16);
-        const double middle = *w.tick(60);
-        require(middle > 1 && middle < 1.15, "wheel still jumps to its final level");
-        near(*w.tick(110), 1.15);
-        require(!w.active() && !w.tick(126), "wheel timer would continue indefinitely");
+    test("wheel starts immediately and settles to the exact goal in 32 ms", [] {
+        pinch::WheelMotion wheel;
+        wheel.add(120, 1, 20, 16);
+        const auto first = wheel.sample(100, 4);
+        require(first && *first > 1 && *first < 1.2, "first frame did not interpolate");
+        wheel.submitted(*first);
+        const auto second = wheel.sample(116, 4);
+        require(second && *second > *first && *second < 1.2, "intermediate frame did not advance smoothly");
+        wheel.submitted(*second);
+        const auto last = wheel.sample(132, 4);
+        require(last.has_value(), "animation ended before its target");
+        near(*last, 1.2);
+        wheel.submitted(*last);
+        require(!wheel.active() && !wheel.sample(140), "settled wheel still has a pending update");
+    });
+    test("a faster display starts with a smaller step and keeps the same target", [] {
+        pinch::WheelMotion fast, slow;
+        fast.add(120, 2, 20, 16);
+        slow.add(120, 2, 20, 16);
+        require(*fast.sample(100, 4) < *slow.sample(100, 16), "initial sample ignored the display cadence");
+        near(*fast.sample(132, 4), *slow.sample(132, 16));
     });
     test("successive wheel notches accumulate from their goal", [] {
-        pinch::WheelMotion w; w.add(120, 2, 0, 15, 100, 16);
-        w.tick(16); w.add(240, 2.1, 16, 15, 100, 16);
-        near(w.goal(), 2 * std::pow(1.15, 3));
+        pinch::WheelMotion wheel;
+        wheel.add(120, 2, 15, 16);
+        wheel.submitted(*wheel.sample(100));
+        wheel.add(240, 2.1, 15, 16);
+        near(wheel.goal(), 2 * std::pow(1.15, 3));
     });
-    test("wheel reversal drops the old direction immediately", [] {
-        pinch::WheelMotion w; w.add(360, 3, 0, 15, 100, 16);
-        const double before = *w.tick(25);
-        w.add(-120, before, 25, 15, 100, 16);
-        require(*w.tick(40) < before && w.goal() < before, "old momentum continued after reversing wheel");
+    test("wheel reversal starts from the latest submitted level", [] {
+        pinch::WheelMotion wheel;
+        wheel.add(120, 2, 15, 16);
+        const auto mid = wheel.sample(100);
+        wheel.submitted(*mid);
+        wheel.add(-120, 2, 15, 16);
+        const auto reversed = wheel.sample(101);
+        require(reversed && *reversed < *mid && *reversed > 2, "reversal continued in the old direction");
+        near(*wheel.sample(133), 2);
     });
     test("wheel limit does not accumulate invisible momentum", [] {
-        pinch::WheelMotion w; w.add(32767, 15, 0, 100, 40, 16);
-        near(*w.tick(40), 16);
-        w.add(-30, 16, 40, 15, 100, 16);
-        require(w.goal() < 16 && *w.tick(56) < 16, "cannot leave upper limit immediately");
-        w.add(-32768, 1, 200, 100, 100, 16); near(*w.tick(300), 1);
-        w.add(30, 1, 300, 15, 100, 16); require(w.goal() > 1, "cannot leave lower limit");
+        pinch::WheelMotion wheel;
+        wheel.add(32767, 15, 100, 16);
+        near(wheel.goal(), 16);
+        wheel.submitted(wheel.goal());
+        wheel.add(-1, 16, 15, 16);
+        require(*wheel.sample(100) < 16, "cannot leave upper limit immediately");
+        wheel.add(-32768, 1, 100, 16);
+        near(wheel.goal(), 1);
+        wheel.submitted(wheel.goal());
+        wheel.add(1, 1, 15, 16);
+        require(*wheel.sample(200) > 1, "cannot leave lower limit");
     });
     test("wheel cancellation cannot replay the old goal", [] {
-        pinch::WheelMotion w; w.add(120, 2, 0, 15, 100, 16); w.cancel();
-        require(!w.tick(20), "cancelled trajectory still publishes frames");
-        w.add(-120, 5, 30, 15, 100, 16); near(w.goal(), 5 / 1.15);
+        pinch::WheelMotion wheel;
+        wheel.add(120, 2, 15, 16);
+        wheel.submitted(*wheel.sample(100));
+        wheel.cancel();
+        require(!wheel.sample(105), "cancelled target still pending");
+        wheel.add(-120, 5, 15, 16);
+        near(wheel.goal(), 5 / 1.15);
     });
     test("wheel negative and fractional movement share the same scale", [] {
-        pinch::WheelMotion w; w.add(-60, 2, 0, 15, 100, 16);
+        pinch::WheelMotion w; w.add(-60, 2, 15, 16);
         near(w.goal(), 2 / std::sqrt(1.15));
-        w.add(0, 2, 0, 15, 100, 16); require(std::isfinite(w.goal()), "invalid wheel goal");
+        w.add(0, 2, 15, 16); require(std::isfinite(w.goal()), "invalid wheel goal");
     });
     test("interactive session stays inactive across lock suspend resume", [] {
         pinch::InteractiveSession session; require(!session.active(), "unknown session must not accept zoom input");
@@ -496,143 +526,53 @@ int main() {
                 !compatibility::overviewAllowed(compatibility::NativeViewportRestore, compatibility::GateSwipe),
                 "overview cannot restore level and position with an incomplete capability set");
     });
-    test("free wheel mailbox coalesces ten thousand small events into one bounded packet", [] {
+    test("zoom wheel mailbox preserves fractional deltas and signed movement", [] {
         std::uint64_t packet = 0;
-        for (int i = 0; i < 10000; ++i) packet = pinch::mergeWheel(packet, 1, 7);
-        require(pinch::wheelDelta(packet) == pinch::kWheelPacketLimit && pinch::wheelRevision(packet) == 7, "unbounded mailbox");
-        packet = pinch::mergeWheel(packet, -1, 7);
-        require(pinch::wheelDelta(packet) == -1, "reversal retained the old queue direction");
-        packet = pinch::mergeWheel(packet, 30, 8);
+        for (int i = 0; i < 10000; ++i) packet = pinch::mergeZoomWheel(packet, 1, 7);
+        require(pinch::wheelDelta(packet) == 10000 && pinch::wheelRevision(packet) == 7, "wheel units were discarded");
+        packet = pinch::mergeZoomWheel(packet, -1500, 7);
+        require(pinch::wheelDelta(packet) == 8500, "net movement was not proportional");
+        packet = pinch::mergeZoomWheel(packet, 30, 8);
         require(pinch::wheelDelta(packet) == 30 && pinch::wheelRevision(packet) == 8, "revision mixed stale input");
     });
-    test("free wheel signed extrema saturate without overflow", [] {
-        auto packet = pinch::mergeWheel(0, 32767, 0xFFFFFFFFu);
-        require(pinch::wheelDelta(packet) == 1200 && pinch::wheelRevision(packet) == 0xFFFFFFFFu, "positive packet overflow");
-        packet = pinch::mergeWheel(packet, -32768, 0xFFFFFFFFu);
-        require(pinch::wheelDelta(packet) == -1200, "negative packet overflow");
+    test("zoom wheel's integer extrema saturate without wrapping", [] {
+        constexpr int maximum = std::numeric_limits<int>::max();
+        constexpr int minimum = std::numeric_limits<int>::min();
+        auto packet = pinch::mergeZoomWheel(pinch::wheelPacket(maximum, 3), 32767, 3);
+        require(pinch::wheelDelta(packet) == maximum, "positive packet overflow");
+        packet = pinch::mergeZoomWheel(pinch::wheelPacket(minimum, 4), -32768, 4);
+        require(pinch::wheelDelta(packet) == minimum, "negative packet overflow");
     });
-    test("a configured twenty percent wheel notch retains its amount with a speed limit", [] {
-        pinch::WheelMotion a, b, c;
-        a.add(120, 2, 100, 20, 100, 16, 400);
-        for (int i=0; i<4; ++i) b.add(30, 2, 100, 20, 100, 16, 400);
-        for (int i=0; i<120; ++i) c.add(1, 2, 100, 20, 100, 16, 400);
-        near(a.goal(), 2.4); near(a.goal(), b.goal()); near(a.goal(), c.goal());
+    test("window switching still keeps only recent directional notches", [] {
+        auto packet = pinch::mergeWheel(0, 32767, 7);
+        require(pinch::wheelDelta(packet) == pinch::kWindowWheelPacketLimit, "unbounded window queue");
+        packet = pinch::mergeWheel(packet, -1, 7);
+        require(pinch::wheelDelta(packet) == -1, "window reversal retained old direction");
     });
-    test("the stronger default wheel gain preserves high-resolution precision", [] {
-        const pinch::Config defaults;
-        require(defaults.wheelStep == 50 && defaults.wheelFreeSpinMaxRate == 1000, "factory wheel gain differs from the documented profile");
-        pinch::WheelMotion a, b, c;
-        a.add(120, 2, 100, defaults.wheelStep, 100, 16, 400);
-        for (int i=0; i<4; ++i) b.add(30, 2, 100, defaults.wheelStep, 100, 16, 400);
-        for (int i=0; i<120; ++i) c.add(1, 2, 100, defaults.wheelStep, 100, 16, 400);
-        near(a.goal(), 3.0); near(a.goal(), b.goal()); near(a.goal(), c.goal());
+    test("free spinning retains its full gain with a short final transition", [] {
+        pinch::WheelMotion wheel;
+        wheel.add(1800, 1, 15, 16);
+        const auto first = wheel.sample(100);
+        require(first && *first > 1 && *first < wheel.goal(), "free-spin first frame was flat or jumped to the end");
+        wheel.submitted(*first);
+        const auto last = wheel.sample(132);
+        near(*last, std::pow(1.15, 15));
+        wheel.submitted(*last);
+        require(!wheel.sample(133), "free spin kept moving after the final frame");
+        wheel.add(-1, 1, 15, 16);
+        near(wheel.goal(), std::pow(1.15, 15 - 1.0 / 120));
     });
-    test("free wheel speed and lookahead are bounded and finish without hidden debt", [] {
-        pinch::WheelMotion w; w.add(32767, 1, 100, 20, 100, 16, 400);
-        require(std::log(w.goal()) <= std::log(5.0)*0.20 + 0.000001, "unbounded distance ahead");
-        double previous = 1;
-        for (unsigned now=116; now<=500; now+=16) {
-            const auto next = w.tick(now);
-            if (!next) break;
-            require(std::log(*next/previous) <= std::log(5.0)*0.016 + 0.000001, "wheel exceeds configured rate");
-            previous = *next;
+    test("coalesced and fine deltas give the same configured movement away from zoom bounds", [] {
+        pinch::WheelMotion coalesced, fine, notch;
+        coalesced.add(300, 1.25, 20, 16);
+        for (int i = 0; i < 300; ++i) {
+            fine.add(1, 1.25, 20, 16);
+            fine.submitted(fine.goal());
         }
-        require(!w.active() && !w.tick(10000), "free wheel retained an invisible tail");
-    });
-    test("free wheel reversing a burst responds on the next frame", [] {
-        pinch::WheelMotion w; w.add(32767, 4, 100, 20, 100, 16, 400);
-        const double before = *w.tick(116);
-        w.add(-1, before, 116, 20, 100, 16, 400);
-        require(w.goal() < before && *w.tick(132) < before, "old burst prevented reversing");
-    });
-    test("free wheel limits have no stored positive or negative debt", [] {
-        pinch::WheelMotion w; w.add(32767, 16, 100, 20, 100, 16, 400);
-        require(!w.active(), "upper limit queued invisible motion");
-        w.add(-1, 16, 100, 20, 100, 16, 400); require(*w.tick(116) < 16, "upper limit cannot reverse");
-        w.cancel(); w.add(-32768, 1, 200, 20, 100, 16, 400);
-        require(!w.active(), "lower limit queued invisible motion");
-        w.add(1, 1, 200, 20, 100, 16, 400); require(*w.tick(216) > 1, "lower limit cannot reverse");
-    });
-    test("a stalled wheel timer cannot teleport through an old backlog", [] {
-        pinch::WheelMotion w; w.add(32767, 1, 100, 20, 100, 16, 400);
-        const double after = *w.tick(10000);
-        require(after > 1 && after <= std::pow(5.0, 0.064) + 0.000001, "stall produced a teleport");
-        w.cancel(); require(!w.tick(10016), "cancel retained stalled motion");
-    });
-    test("adaptive free spin preserves one ordinary notch and high resolution subdivisions", [] {
-        pinch::WheelMotion a, b, c;
-        a.add(120, 1, 1000, 35, 100, 16, 400, 700);
-        for (int i=0;i<4;++i) b.add(30, 1, 1000, 35, 100, 16, 400, 700);
-        for (int i=0;i<120;++i) c.add(1, 1, 1000, 35, 100, 16, 400, 700);
-        near(a.goal(), 1.35); near(b.goal(), a.goal()); near(c.goal(), a.goal());
-    });
-    test("spaced ordinary notches retain their complete proportional gain", [] {
-        pinch::WheelMotion w; w.add(120, 1, 1000, 35, 100, 16, 400, 700);
-        for (unsigned time=1016;time<=1256;time+=16) w.tick(time);
-        near(w.goal(), 1.35); require(!w.active(), "ordinary first notch did not finish");
-        w.add(120, 1.35, 1300, 35, 100, 16, 400, 700);
-        near(w.goal(), 1.35*1.35);
-    });
-    test("free spin adaptation can be disabled without changing the legacy trajectory", [] {
-        pinch::WheelMotion legacy, disabled;
-        legacy.add(1200, 1, 1000, 35, 100, 16, 400);
-        disabled.add(1200, 1, 1000, 35, 100, 16, 400, 0);
-        near(disabled.goal(), legacy.goal());
-        for (unsigned time=1016;time<1300;time+=16) {
-            const auto a=legacy.tick(time), b=disabled.tick(time);
-            require(a.has_value()==b.has_value(), "opt-out changed completion time");
-            if (a) near(*a,*b);
-        }
-    });
-    test("large free spin batches keep forty milliseconds of bounded native travel", [] {
-        pinch::WheelMotion w; w.add(1200, 1, 1000, 35, 100, 16, 400, 700);
-        require(std::log(w.goal()) <= std::log(8.0)*0.04+0.000001, "free spin retained a long backlog");
-        double previous=1;
-        for (unsigned time=1016;time<=1064;time+=16) {
-            if (const auto next=w.tick(time)) {
-                require(std::log(*next/previous) <= std::log(8.0)*0.016+0.000001, "free spin exceeded its explicit rate cap");
-                previous=*next;
-            }
-        }
-        require(!w.active() && !w.tick(1100), "free spin extrapolated beyond the short follow window");
-    });
-    test("rapid raw volume activates adaptation while tiny event count alone does not", [] {
-        pinch::WheelMotion tiny, fast;
-        for(int i=0;i<120;++i) tiny.add(1, 1, 1000, 35, 100, 16, 400, 700);
-        near(tiny.goal(),1.35);
-        fast.add(120,1,1000,35,100,16,400,700);
-        fast.tick(1016); fast.add(120,1,1016,35,100,16,400,700);
-        const double current=*fast.tick(1032);
-        fast.add(120,current,1032,35,100,16,400,700);
-        require(std::log(fast.goal()/current) <= std::log(8.0)*0.04+0.000001,
-                "sustained physical wheel volume did not shorten its pending distance");
-    });
-    test("one reverse unit discards burst velocity and the old pending direction", [] {
-        pinch::WheelMotion w; w.add(1200,4,1000,35,100,16,400,700);
-        const double current=*w.tick(1016);
-        w.add(-1,current,1016,35,100,16,400,700);
-        near(w.goal(),current/std::pow(1.35,1.0/120));
-        require(*w.tick(1032)<current, "burst momentum survived a tiny reversal");
-    });
-    test("free spin bounds have no hidden windup", [] {
-        pinch::WheelMotion w; w.add(1200,16,1000,35,100,16,400,700);
-        require(!w.active(), "upper limit retained motion");
-        w.add(-1,16,1016,35,100,16,400,700); require(*w.tick(1032)<16, "cannot leave upper limit");
-        w.cancel(); w.add(-1200,1,1100,35,100,16,400,700);
-        require(!w.active(), "lower limit retained motion");
-        w.add(1,1,1116,35,100,16,400,700); require(*w.tick(1132)>1, "cannot leave lower limit");
-    });
-    test("a new precise gesture after a quiet gap loses the old burst classification", [] {
-        pinch::WheelMotion w; w.add(1200,1,1000,35,100,16,400,700);
-        for(unsigned time=1016;time<=1064;time+=16) w.tick(time);
-        const double current=w.goal();
-        w.add(1,current,1200,35,100,16,400,700);
-        near(w.goal(),current*std::pow(1.35,1.0/120));
-        w.cancel(); require(!w.tick(1300), "cancel retained a burst callback");
-    });
-    test("explicit burst cap never reduces a higher configured base cap", [] {
-        pinch::WheelMotion w; w.add(1200,1,1000,35,100,16,1500,700);
-        near(w.goal(),std::pow(16.0,0.04));
+        notch.add(120, 1.25, 20, 16);
+        near(notch.goal(), 1.5);
+        near(coalesced.goal(), fine.goal());
+        near(coalesced.goal(), 1.25 * std::pow(1.20, 2.5));
     });
     std::cout << passed << " tests passed\n";
 }

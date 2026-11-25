@@ -77,13 +77,12 @@ struct HostTestAccess {
     static void input(Host& host, int delta, LONG epoch, ULONGLONG now) { host.wheelInput(delta, epoch, now); }
     static void tick(Host& host, ULONGLONG now) { host.render(now); }
     static void toggleZoom(Host& host, ULONGLONG now) { host.toggleZoomMode(now); }
-    static DWORD disarmZoom(Host& host) { host.disarmZoomMode(); return host.disarmedAt_; }
+    static void resetMouse(Host& host) { host.resetFromMouse(); }
     static void windows(Host& host, WindowSwitcher& backend) { host.windowSwitcher_ = &backend; }
     static int windowPending(Host& host, ULONGLONG now) { return host.windowWheel_.pending(now); }
     static void cancel(Host& host) { host.cancelWheel(); }
     static bool active(Host& host) { return host.wheel_.active(); }
     static double goal(Host& host) { return host.wheel_.goal(); }
-    static void freeSpin(Host& host, int rate) { host.config_.wheelFreeSpinMaxRate = rate; }
     static void resume(Host& host, ULONGLONG now) { host.activity_.resume(); host.applySessionState(); host.refreshSession(now, true); }
     static void refresh(Host& host, ULONGLONG now) { host.refreshSession(now); }
     static bool sessionActive(Host& host) { return host.sessionActive_; }
@@ -144,47 +143,144 @@ int wmain(int argc, wchar_t** argv) {
         auto& host = fixture.host;
         runtime::HostTestAccess::nativeBackend(host, record);
         runtime::HostTestAccess::toggleZoom(host, 100);
-        require(record.zoomModeActive && record.requestedLevel == 15000 && record.requestedSequence,
-                "the primary mouse chord opens at 150 percent when no previous zoom exists");
+        require(record.zoomModeActive && record.nativeLevel == 10000 &&
+                !record.requestedSequence && !record.pendingCommand,
+                "the chord arms controls at 100 percent without adding zoom");
         record.nativeLevel = 17500;
         runtime::HostTestAccess::tick(host, 116);
         runtime::HostTestAccess::toggleZoom(host, 132);
-        require(!record.zoomModeActive && record.pendingCommand == 3,
-                "the same primary mouse chord deactivates immediately and requests normal zoom");
-        const LONG sequence = record.requestedSequence;
-        runtime::HostTestAccess::toggleZoom(host, 148);
-        require(!record.zoomModeActive && record.requestedSequence == sequence,
-                "a rapid re-enable waits for the in-flight reset rather than overwriting it");
-        record.pendingCommand = 0; record.nativeLevel = 10000;
+        require(!record.zoomModeActive && record.nativeLevel == 17500 &&
+                !record.requestedSequence && !record.pendingCommand,
+                "the chord disarms controls without changing zoom");
+        runtime::HostTestAccess::tick(host, 148);
+        require(!record.zoomModeActive, "an old magnified level cannot undo deliberate disarm");
+        record.nativeLevel = 22500;
+        record.currentSource = static_cast<LONG>(bridge::InputSource::Keyboard);
+        InterlockedIncrement(&record.nativeCommands);
         runtime::HostTestAccess::tick(host, 164);
-        require(record.zoomModeActive && record.requestedLevel == 17500 && record.requestedSequence != sequence,
-                "a completed reset allows the pending toggle to restore the last visible level");
+        require(record.zoomModeActive && record.nativeLevel == 22500 &&
+                !record.requestedSequence && !record.pendingCommand,
+                "a genuinely new keyboard zoom result re-arms at its actual factor");
+        runtime::HostTestAccess::resetMouse(host);
+        require(!record.zoomModeActive && record.pendingCommand == 3,
+                "an armed middle click disarms and requests a reset");
         runtime::HostTestAccess::tick(host, 180);
-        require(record.zoomModeActive, "at normal zoom its active mode remains available for the next wheel direction");
-        record.magnifierReady = 0;
+        require(!record.zoomModeActive, "the previously magnified factor cannot arm during a reset");
+        record.pendingCommand = 0; record.nativeLevel = 10000;
         runtime::HostTestAccess::tick(host, 196);
-        require(!record.zoomModeActive, "disappearing native availability clears the active mode");
+        require(!record.zoomModeActive, "the acknowledged normal factor remains disarmed");
     }
     {
         HostFixture fixture(10);
         auto& record = fixture.record;
         auto& host = fixture.host;
         runtime::HostTestAccess::tick(host, 100);
-        require(record.zoomModeActive, "a native non-unit zoom uses the same mode as the mouse chord");
-        const auto disarmed = runtime::HostTestAccess::disarmZoom(host);
-        InterlockedIncrement(&record.nativeCommands);
-        record.nativeZoomInputTime = static_cast<LONG>(disarmed - 1);
+        require(record.zoomModeActive, "the effective mouse mode is active above normal zoom");
+        record.overviewSavedLevel = 20000; record.nativeLevel = 10000;
         runtime::HostTestAccess::tick(host, 116);
-        require(!record.zoomModeActive, "asynchronous and stale key activity cannot undo deactivation");
-        record.nativeZoomInputTime = static_cast<LONG>(disarmed + 1);
-        record.pendingCommand = 3;
+        require(record.zoomModeActive, "temporary Task View normalization retains the saved magnified mode");
+        record.magnifierReady = 0;
         runtime::HostTestAccess::tick(host, 132);
-        require(!record.zoomModeActive, "even a fresh key cannot publish a mode in front of a pending reset");
-        record.pendingCommand = 0;
+        require(!record.zoomModeActive, "loss of native availability stops public mouse-only mode");
+        record.magnifierReady = 1;
         runtime::HostTestAccess::tick(host, 148);
-        require(record.zoomModeActive, "a verified newer plus request re-enters the mode at non-unit zoom");
+        require(record.zoomModeActive, "transient backend readiness does not erase the saved magnified mode");
         runtime::HostTestAccess::lock(host);
         require(!record.zoomModeActive, "the session lock clears public zoom mode immediately");
+    }
+    {
+        const auto mutexName = L"Local\\BetterMagnifier.TestLease." + std::to_wstring(GetCurrentProcessId());
+        runtime::SessionLease owner, duplicate;
+        require(owner.acquire(mutexName.c_str()), "first shell candidate reserves the session role");
+        require(!duplicate.acquire(mutexName.c_str()), "a second candidate cannot replace the published shell");
+        owner.release();
+        require(duplicate.acquire(mutexName.c_str()), "session role becomes available after the owner unloads");
+    }
+    {
+        HostFixture fixture(20, {2, 0, 0});
+        auto& record = fixture.record;
+        auto& host = fixture.host;
+        record.gateReady = 1;
+        record.shellPid = static_cast<LONG>(GetCurrentProcessId());
+        runtime::HostTestAccess::nativeBackend(host, record);
+        bridge::enqueueWheel(&record, 120, 20, 1080);
+        runtime::HostTestAccess::tick(host, 1088);
+        require(record.requestedSequence && record.requestSource == static_cast<LONG>(bridge::InputSource::Wheel),
+                "a real submitted wheel objective exists before the pinch begins");
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1), 1100);
+        record.currentSource = static_cast<LONG>(bridge::InputSource::Wheel);
+        record.nativeLevel = 23500;
+        simulated.zoom = 2.1;
+        bridge::enqueueWheel(&record, 180, 20, 1101);
+        const LONG wheelSequence = record.requestedSequence;
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.12), 1116);
+        require(record.requestedSequence == wheelSequence + 1 && record.requestInputRevision != 20 &&
+                record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch) &&
+                record.requestedLevel == 21000 && !record.wheelPacket && !record.wheelActive,
+                "classification clears queued wheel and its old epoch before pinching from the visible factor");
+        bridge::enqueueWheel(&record, 120, record.inputRevision, 1117);
+        runtime::HostTestAccess::tick(host, 1118);
+        const LONG wheelDuringPinch = record.requestedLevel;
+        require(wheelDuringPinch == 21000 + 210 * pinch::Config{}.wheelStep &&
+                record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch) && !record.wheelActive,
+                "wheel travel changes the recognizer's shared factor instead of starting a competing animation");
+        record.nativeLevel = 28000;
+        record.currentSource = static_cast<LONG>(bridge::InputSource::Keyboard);
+        record.appliedSequence = record.requestedSequence;
+        InterlockedIncrement(&record.nativeCommands); InterlockedIncrement(&record.zoomRevision); InterlockedIncrement(&record.inputRevision);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.18), 1132);
+        const LONG beforeLift = record.requestedLevel;
+        require(beforeLift > 28000 && beforeLift < 32000 && record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch),
+                "following finger travel adopts a newer native keyboard zoom without snapping to a prior source");
+        bridge::enqueueWheel(&record, 30, record.inputRevision, 1147);
+        runtime::HostTestAccess::frame(host, pinchDevice, {}, 1148);
+        const LONG lastPinch = record.requestedLevel;
+        require(!record.down && record.zoomModeActive && lastPinch > beforeLift &&
+                record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch),
+                "wheel travel before lift is included in the last pinch target; the mode stays above 100%");
+        bridge::enqueueWheel(&record, 120, record.inputRevision, 1150);
+        runtime::HostTestAccess::tick(host, 1164);
+        const double expected = lastPinch / 10000.0 * (1 + pinch::Config{}.wheelStep / 100.0);
+        require(record.requestSource == static_cast<LONG>(bridge::InputSource::Wheel) &&
+                std::abs(runtime::HostTestAccess::goal(host) - expected) < 0.0001,
+                "a wheel event after lift continues from the final unacknowledged pinch target");
+    }
+    {
+        HostFixture fixture(45, {1, 0, 0});
+        auto& record = fixture.record;
+        auto& host = fixture.host;
+        record.gateReady = 1; record.shellPid = static_cast<LONG>(GetCurrentProcessId());
+        runtime::HostTestAccess::nativeBackend(host, record);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1), 1180);
+        require(!record.zoomModeActive, "unclassified contacts do not activate the zoom mode");
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.1), 1196);
+        require(record.zoomModeActive, "a recognized pinch activates zoom controls at normal factor");
+        record.nativeLevel = 12500;
+        runtime::HostTestAccess::frame(host, pinchDevice, {}, 1212);
+        require(record.zoomModeActive, "lifting fingers keeps the mode while the actual zoom is magnified");
+        record.nativeLevel = 10000;
+        runtime::HostTestAccess::tick(host, 1228);
+        require(!record.zoomModeActive, "returning naturally to normal disarms without a chord");
+    }
+    {
+        HostFixture fixture(12);
+        auto& record = fixture.record;
+        auto& host = fixture.host;
+        record.gateReady = 1;
+        record.shellPid = static_cast<LONG>(GetCurrentProcessId());
+        runtime::HostTestAccess::nativeBackend(host, record);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1), 1000);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.15), 1016);
+        require(record.down && record.pinchFrameTime == 1016, "confirmed pinch identifies its last real HID report");
+        runtime::HostTestAccess::tick(host, 1166);
+        require(record.down, "polling keeps a fresh pinch active at the contact deadline");
+        runtime::HostTestAccess::tick(host, 1167);
+        require(!record.down && !record.pinchFrameTime,
+                "missing finger lift releases the pinch and pointer protection even while the host is live");
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1), 1200);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.15), 1216);
+        require(record.down && record.pinchFrameTime == 1216,
+                "a new physical pinch works after the abandoned gesture expires");
     }
     HIDP_VALUE_CAPS caps{};
     caps.LogicalMin = -32768;
@@ -234,13 +330,15 @@ int wmain(int argc, wchar_t** argv) {
     {
         HostFixture fixture(4);
         auto& record = fixture.record; auto& host = fixture.host;
-        runtime::HostTestAccess::input(host, 120, 4, 100);
-        require(runtime::HostTestAccess::active(host) && record.wheelActive,
-                "real host starts a wheel trajectory from a current revision");
+        runtime::HostTestAccess::input(host, 120, 4, 84);
+        require(runtime::HostTestAccess::active(host), "the host accepts a wheel target from the current revision");
         const double wheelGoal = runtime::HostTestAccess::goal(host);
+        runtime::HostTestAccess::tick(host, 84);
+        runtime::HostTestAccess::tick(host, 100);
+        require(simulated.zoom > 2 && simulated.zoom < wheelGoal, "the first wheel sample makes visible progress immediately");
         runtime::HostTestAccess::tick(host, 116);
         runtime::HostTestAccess::tick(host, 132);
-        require(simulated.zoom > 2 && simulated.zoom < wheelGoal, "real host renders decimal wheel frames through its zoom controller");
+        require(std::abs(simulated.zoom - wheelGoal) < 0.001, "the host delivers its full decimal wheel target");
         runtime::HostTestAccess::cancel(host);
         const LONG cancelledEpoch = record.inputRevision;
         runtime::HostTestAccess::input(host, 120, 4, 140);
@@ -338,8 +436,10 @@ int wmain(int argc, wchar_t** argv) {
         for (int i=0; i<10000; ++i) bridge::enqueueWheel(&record, 1, 70, 1000);
         require(!runtime::HostTestAccess::active(host), "producer cannot render before the host consumes its bounded mailbox");
         runtime::HostTestAccess::tick(host, 1000);
-        require(record.wheelPacket == 0 && runtime::HostTestAccess::active(host) && runtime::HostTestAccess::goal(host) < 3,
-                "host consumes a free-spin burst once with bounded lookahead");
+        const double notch = 1 + pinch::Config{}.wheelStep / 100.0;
+        require(record.wheelPacket == 0 && runtime::HostTestAccess::active(host) &&
+                std::abs(runtime::HostTestAccess::goal(host) - std::min(16.0, 2 * std::pow(notch, 10000.0 / 120))) < 0.001,
+                "host consumes the full free-spin burst once with the configured factor bound");
         runtime::HostTestAccess::tick(host, 1016); runtime::HostTestAccess::tick(host, 1032);
         bridge::enqueueWheel(&record, -1, 70, 1032);
         runtime::HostTestAccess::tick(host, 1032);
@@ -354,7 +454,8 @@ int wmain(int argc, wchar_t** argv) {
                 "input older than two hundred milliseconds cannot replay after a stall");
         bridge::enqueueWheel(&record, 120, record.inputRevision, 1320);
         record.shellMask = 1; runtime::HostTestAccess::tick(host, 1320);
-        require(runtime::HostTestAccess::active(host) && !record.wheelPacket, "fresh wheel input in Task View uses the bounded mailbox instead of being discarded");
+        require(runtime::HostTestAccess::goal(host) >= beforeReverse && !record.wheelPacket,
+                "fresh wheel input in Task View uses the mailbox instead of being discarded");
         record.shellMask = 0;
         bridge::enqueueWheel(&record, 120, record.inputRevision, 1340);
         InterlockedIncrement(&record.inputRevision); runtime::HostTestAccess::tick(host, 1340);
@@ -366,7 +467,7 @@ int wmain(int argc, wchar_t** argv) {
         record.gateCaps = 0; record.gateReady = 0;
         bridge::enqueueWheel(&record, 120, 90, 1000);
         runtime::HostTestAccess::tick(host, 1000); runtime::HostTestAccess::tick(host, 1016); runtime::HostTestAccess::tick(host, 1032);
-        require(runtime::HostTestAccess::active(host) && simulated.zoom > 2 && !record.gateReady,
+        require(simulated.zoom > 2 && !record.gateReady,
                 "a missing shell gesture backend does not disable smooth mouse wheel zoom");
         runtime::HostTestAccess::cancel(host);
         record.magnifierReady = 0; record.nativeCaps = 0; record.resolverReasonNative = ERROR_NOT_SUPPORTED;
@@ -391,7 +492,7 @@ int wmain(int argc, wchar_t** argv) {
         auto& record = fixture.record; auto& host = fixture.host;
         bridge::enqueueWheel(&record, 1, 123, 1001);
         runtime::HostTestAccess::tick(host, 1000);
-        require(runtime::HostTestAccess::active(host) && !record.wheelPacket,
+        require(runtime::HostTestAccess::goal(host) > 2 && !record.wheelPacket,
                 "a fresh producer timestamp one millisecond after the sampled frame is not discarded");
     }
     {
@@ -400,7 +501,7 @@ int wmain(int argc, wchar_t** argv) {
         record.shellMask = 2; // Showing desktop is telemetry, not Task View.
         runtime::HostTestAccess::input(host, 120, 160, 1000);
         runtime::HostTestAccess::tick(host, 1016); runtime::HostTestAccess::tick(host, 1032);
-        require(runtime::HostTestAccess::active(host) && simulated.zoom > 2,
+        require(simulated.zoom > 2,
                 "showing desktop keeps smooth wheel zoom available");
         record.shellMask = 3;
         InterlockedIncrement(&record.inputRevision); // Entering Task View invalidates motion captured before its native suspension.
@@ -459,7 +560,7 @@ int wmain(int argc, wchar_t** argv) {
         const unsigned writesBefore = transformWrites;
         runtime::HostTestAccess::input(host, 120, 180, 1000);
         runtime::HostTestAccess::tick(host, 1016); runtime::HostTestAccess::tick(host, 1032);
-        require(runtime::HostTestAccess::active(host) && record.requestedLevel > 30000 &&
+        require(record.wheelActive && record.requestedLevel > 30000 &&
                 record.requestSource == static_cast<LONG>(bridge::InputSource::Wheel) && transformWrites == writesBefore,
                 "fresh Task View wheel math starts from the saved native level and enqueues its typed source without a public transform");
     }
@@ -471,7 +572,7 @@ int wmain(int argc, wchar_t** argv) {
         require(!runtime::HostTestAccess::active(host), "cold wheel input waits for the native UI instead of using a public replacement magnifier");
         record.magnifierReady = 1;
         runtime::HostTestAccess::tick(host, 1016);
-        require(runtime::HostTestAccess::active(host) && runtime::HostTestAccess::goal(host) > 2,
+        require(runtime::HostTestAccess::goal(host) > 2,
                 "a bounded first wheel notch is delivered once the native UI becomes ready");
     }
     {
@@ -482,7 +583,7 @@ int wmain(int argc, wchar_t** argv) {
         runtime::HostTestAccess::input(host, 1, 210, 3000); // No host frame ran while the old intent expired.
         record.magnifierReady = 1;
         runtime::HostTestAccess::tick(host, 3016);
-        require(runtime::HostTestAccess::active(host) && runtime::HostTestAccess::goal(host) > 2 && runtime::HostTestAccess::goal(host) < 2.01,
+        require(runtime::HostTestAccess::goal(host) > 2 && runtime::HostTestAccess::goal(host) < 2.02,
                 "fresh fine input after a cold-start stall cannot revive an expired full notch");
     }
     {
@@ -660,69 +761,44 @@ int wmain(int argc, wchar_t** argv) {
         HostFixture fixture(210, {1, 0, 0}); auto& record = fixture.record; auto& host = fixture.host;
         runtime::HostTestAccess::nativeBackend(host, record);
         const unsigned writesBefore = transformWrites;
-        bridge::enqueueWheel(&record, 120, 210, 1000); runtime::HostTestAccess::tick(host, 1016);
-        require(record.requestedSequence == 1 && record.requestedLevel > 10000 && record.requestedLevel <= 10261 &&
+        const LONG expected = 10000 + 100 * pinch::Config{}.wheelStep;
+        bridge::enqueueWheel(&record, 120, 210, 1000); runtime::HostTestAccess::tick(host, 1000);
+        require(record.requestedSequence == 1 && record.requestedLevel > 10000 && record.requestedLevel < expected &&
                 record.requestSource == static_cast<LONG>(bridge::InputSource::Wheel) && transformWrites == writesBefore,
-                "the first wheel event waiting one frame sends positive native progress during that frame instead of an empty 100 percent objective");
+                "even a same-clock first wheel event publishes immediate proportional movement");
+        runtime::HostTestAccess::tick(host, 1016); runtime::HostTestAccess::tick(host, 1032);
+        const LONG lastSequence = record.requestedSequence;
+        require(record.requestedLevel == expected && !runtime::HostTestAccess::active(host),
+                "the exact wheel goal is submitted within 32 milliseconds");
+        for (unsigned time = 1048; time <= 1256; time += 16) runtime::HostTestAccess::tick(host, time);
+        require(record.requestedSequence == lastSequence && record.requestedLevel == expected,
+                "an input-free interval schedules no residual wheel motion after the deadline");
     }
     {
         HostFixture fixture(211, {1, 0, 0}); auto& record = fixture.record;
         runtime::HostTestAccess::nativeBackend(fixture.host, record);
-        bridge::enqueueWheel(&record, 120, 211, 1000); runtime::HostTestAccess::tick(fixture.host, 1100);
-        require(record.requestedLevel > 10000 && record.requestedLevel <= 10261,
-                "initial wheel scheduling credits at most sixteen milliseconds instead of replaying a stale mailbox delay");
-    }
-    {
-        HostFixture fixture(212, {1, 0, 0}); auto& record = fixture.record;
-        runtime::HostTestAccess::nativeBackend(fixture.host, record);
-        bridge::enqueueWheel(&record, 120, 212, 1000); runtime::HostTestAccess::tick(fixture.host, 1000);
-        require(record.requestedSequence == 0 && runtime::HostTestAccess::active(fixture.host),
-                "an event captured in the current millisecond does not invent elapsed time or send an unchanged baseline");
-        runtime::HostTestAccess::tick(fixture.host, 1016);
-        require(record.requestedSequence == 1 && record.requestedLevel > 10000,
-                "a same-millisecond wheel event progresses on the next actual frame");
-    }
-    {
-        HostFixture fixture(213, {1, 0, 0}); auto& record = fixture.record;
-        runtime::HostTestAccess::nativeBackend(fixture.host, record);
-        bridge::enqueueWheel(&record, 120, 213, 1001); runtime::HostTestAccess::tick(fixture.host, 1000);
-        require(record.requestedSequence == 0 && runtime::HostTestAccess::active(fixture.host),
-                "a concurrent future capture is retained without manufacturing an early first target");
-        runtime::HostTestAccess::tick(fixture.host, 1016);
-        require(record.requestedSequence == 1 && record.requestedLevel > 10000,
-                "a retained concurrent capture advances at the next actual frame");
-    }
-    {
-        HostFixture fixture(214, {1, 0, 0}); auto& record = fixture.record;
-        runtime::HostTestAccess::nativeBackend(fixture.host, record);
-        bridge::enqueueWheel(&record, 1, 214, 1000); runtime::HostTestAccess::tick(fixture.host, 1016);
-        require(record.requestedLevel > 10000 && record.requestedLevel < 10100,
-                "first high-resolution delta keeps sub-percent native precision without a forced one percent kick");
-        for (unsigned time=1032; time<=1144; time+=16) runtime::HostTestAccess::tick(fixture.host, time);
+        bridge::enqueueWheel(&record, 1, 211, 1001); runtime::HostTestAccess::tick(fixture.host, 1000);
         const auto expected = std::llround(std::pow(1 + pinch::Config{}.wheelStep / 100.0, 1.0 / 120) * 10000);
-        require(record.requestedLevel == expected && !runtime::HostTestAccess::active(fixture.host),
-                "captured-time scheduling retains the exact fractional wheel goal and finite endpoint");
+        require(record.requestedSequence == 1 && record.requestedLevel >= 10000 && record.requestedLevel <= expected,
+                "a concurrent fresh fractional delta does not receive an artificial first jump");
+        runtime::HostTestAccess::tick(fixture.host, 1032);
+        require(record.requestedLevel == expected, "short interpolation preserves the entire fractional delta");
     }
     {
-        HostFixture fixture(215, {1, 0, 0}); auto& record = fixture.record;
+        HostFixture fixture(212, {1.25, 0, 0}); auto& record = fixture.record;
         runtime::HostTestAccess::nativeBackend(fixture.host, record);
-        bridge::enqueueWheel(&record, 120, 215, 1000); runtime::HostTestAccess::tick(fixture.host, 1016);
-        bridge::enqueueWheel(&record, 120, 215, 1020); runtime::HostTestAccess::tick(fixture.host, 1048);
-        const pinch::Config config{}; pinch::WheelMotion expected;
-        expected.add(120, 1, 1000, config.wheelStep, config.wheelDuration, 16, config.wheelMaxRate); expected.tick(1016);
-        expected.add(120, 1, 1048, config.wheelStep, config.wheelDuration, 16, config.wheelMaxRate);
-        require(record.requestedLevel == std::llround(*expected.tick(1048) * 10000),
-                "additional active wheel input keeps the processing clock and cannot rewind or count event residence twice");
-    }
-    {
-        HostFixture fixture(216, {1, 0, 0}); auto& record = fixture.record;
-        runtime::HostTestAccess::nativeBackend(fixture.host, record);
-        bridge::enqueueWheel(&record, 120, 216, 1000); runtime::HostTestAccess::tick(fixture.host, 1016);
-        const LONG forward = record.requestedLevel; record.nativeLevel = forward;
-        bridge::enqueueWheel(&record, -1, 216, 1020); runtime::HostTestAccess::tick(fixture.host, 1032);
-        require(record.requestedLevel <= forward, "captured scheduling cannot deliver forward momentum after reversing a wheel gesture");
-        runtime::HostTestAccess::tick(fixture.host, 1048);
-        require(record.requestedLevel < forward, "a tiny reverse wheel delta still responds on its first advancing frame");
+        const double notch = 1 + pinch::Config{}.wheelStep / 100.0;
+        bridge::enqueueWheel(&record, 120, 212, 1000); runtime::HostTestAccess::tick(fixture.host, 1000);
+        runtime::HostTestAccess::tick(fixture.host, 1016); runtime::HostTestAccess::tick(fixture.host, 1032);
+        const LONG forward = record.requestedLevel;
+        bridge::enqueueWheel(&record, -1, 212, 1033); runtime::HostTestAccess::tick(fixture.host, 1048);
+        require(record.requestedLevel < forward && record.nativeLevel == 12500 &&
+                std::abs(runtime::HostTestAccess::goal(fixture.host) - 1.25 * std::pow(notch, 119.0 / 120)) < 0.0001,
+                "reversal uses the last submitted goal without waiting for the native renderer");
+        bridge::enqueueWheel(&record, 240, 212, 1050); runtime::HostTestAccess::tick(fixture.host, 1064);
+        runtime::HostTestAccess::tick(fixture.host, 1096);
+        require(record.requestedLevel == std::llround(1.25 * std::pow(notch, 359.0 / 120) * 10000),
+                "successive wheel frames preserve every accepted delta through native ACK delay");
     }
     {
         HostFixture fixture(217, {1, 0, 0}); auto& record = fixture.record;
@@ -731,27 +807,27 @@ int wmain(int argc, wchar_t** argv) {
         InterlockedIncrement(&record.inputRevision); InterlockedIncrement(&record.zoomRevision); record.nativeLevel = 20000;
         bridge::enqueueWheel(&record, 1, record.inputRevision, 1050); runtime::HostTestAccess::tick(fixture.host, 1066);
         require(record.requestedLevel > 20000 && record.requestedLevel < 20200,
-                "a fresh wheel trajectory after a keyboard epoch adopts its new base and captures only the new event age");
+                "a fresh wheel target after a keyboard epoch starts at the new native base");
     }
     {
-        HostFixture fixture(230,{1,0,0}); auto& record=fixture.record;
-        runtime::HostTestAccess::nativeBackend(fixture.host,record);
-        bridge::enqueueWheel(&record,1200,230,1000); runtime::HostTestAccess::tick(fixture.host,1016);
-        require(record.requestedLevel>10261 && record.requestedLevel<=std::ceil(std::pow(1 + pinch::Config{}.wheelFreeSpinMaxRate / 100.0, 0.016) * 10000) &&
-                record.requestSource==static_cast<LONG>(bridge::InputSource::Wheel),
-                "the host opts into the explicit fast cap while retaining a typed native wheel request");
-        runtime::HostTestAccess::tick(fixture.host,1032); runtime::HostTestAccess::tick(fixture.host,1048);
-        runtime::HostTestAccess::tick(fixture.host,1064);
-        require(!runtime::HostTestAccess::active(fixture.host) && !record.wheelActive,
-                "a free-spin batch ends without extrapolation within forty milliseconds plus one frame");
-    }
-    {
-        HostFixture fixture(231,{1,0,0}); auto& record=fixture.record;
-        runtime::HostTestAccess::nativeBackend(fixture.host,record);
-        runtime::HostTestAccess::freeSpin(fixture.host,0);
-        bridge::enqueueWheel(&record,1200,231,1000); runtime::HostTestAccess::tick(fixture.host,1016);
-        require(record.requestedLevel>10000 && record.requestedLevel<=10261,
-                "opting out of burst adaptation retains the configured normal rate cap");
+        HostFixture fixture(230, {1, 0, 0}); auto& record = fixture.record;
+        runtime::HostTestAccess::nativeBackend(fixture.host, record);
+        const double notch = 1 + pinch::Config{}.wheelStep / 100.0;
+        bridge::enqueueWheel(&record, 960, 230, 1000);
+        bridge::enqueueWheel(&record, 720, 230, 1001);
+        bridge::enqueueWheel(&record, -60, 230, 1002);
+        runtime::HostTestAccess::tick(fixture.host, 1016);
+        const auto expected = std::llround(std::min(16.0, std::pow(notch, 13.5)) * 10000);
+        require(record.requestedSequence == 1 && record.requestedLevel > 10000 && record.requestedLevel < expected &&
+                record.requestSource == static_cast<LONG>(bridge::InputSource::Wheel),
+                "the host starts following a signed free-spin batch on its first frame");
+        runtime::HostTestAccess::tick(fixture.host, 1032); runtime::HostTestAccess::tick(fixture.host, 1048);
+        require(record.requestedLevel == expected, "free-spin interpolation preserves input beyond the former rate cap");
+        const LONG lastSequence = record.requestedSequence;
+        record.nativeLevel = record.requestedLevel; record.appliedSequence = record.requestedSequence;
+        runtime::HostTestAccess::tick(fixture.host, 1064); runtime::HostTestAccess::tick(fixture.host, 1080);
+        require(record.requestedSequence == lastSequence && !runtime::HostTestAccess::active(fixture.host) && !record.wheelActive,
+                "a free-spin batch ends once it is acknowledged");
     }
     if (argc != 2) {
         std::cerr << "Usage: runtime-tests path-to-mod.dll\n";

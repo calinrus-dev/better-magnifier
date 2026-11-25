@@ -4,7 +4,7 @@
 
 Un proyecto de **accesibilidad para Windows**, inspirado en el efecto de zoom de **KWin / KDE Plasma**. Permite ampliar todo el escritorio con un **pellizco de tres dedos**, usando el motor de la Lupa de Windows. Abre los dedos para acercar y ciérralos para alejar. Puedes alternarlo con **Win + «+» / «−»**, también en el teclado numérico.
 
-**0.8.0 experimental.** Pulsa **clic izquierdo y derecho a la vez** para activar o desactivar el zoom. Un marco rojo fino señala que está activo. En ese modo, la **rueda sola** acerca o aleja. También puedes entrar mediante un pellizco de tres dedos, **Win+rueda** o **Win+«+»**. **Win+clic central** apaga el modo y vuelve al 100 %.
+**0.8.3 experimental.** El pellizco de tres dedos enciende el modo de zoom mientras la vista esté ampliada, incluso después de soltar los dedos. Al volver al 100 %, se apaga. Pulsa **clic izquierdo y derecho a la vez** para alternarlo conservando el nivel. Con el modo activo, **rueda principal** amplía o reduce, **clic de rueda** vuelve al 100 % y **rueda lateral** desplaza el contenido verticalmente.
 
 Las funciones avanzadas están validadas en Windows 11 x64, compilación **26200**, con Windhawk **1.7.3**. Una versión o interfaz no verificada conserva los controles estándar de la Lupa; no implica soporte del zoom continuo. El mod conserva la configuración de gestos del touchpad.
 
@@ -12,9 +12,10 @@ Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantall
 
 ## Comportamiento
 
-- **Rueda** en el modo zoom, o **Win+rueda** para entrar, amplía o reduce de forma continua. Cada muesca aplica un cambio proporcional (50 % por defecto); una rueda de alta resolución conserva los deltas pequeños. Los giros rápidos se detectan por volumen reciente, conservan como máximo 40 ms de recorrido pendiente y usan un límite de velocidad separado. El exceso se descarta para evitar una cola larga tras frenar; no se extrapola sin nuevos eventos. Cambiar de sentido cancela el impulso anterior. Una trayectoria nueva aprovecha hasta 16 ms del tiempo real de captura, evitando un frame inicial vacío; no simula Win+«+» ni añade un aumento mínimo artificial. Con el modo apagado, la rueda sin modificador vuelve a desplazar.
+- **Rueda principal** en el modo zoom, o **Win+rueda** como atajo, aplica un factor de 1,2 por cada 120 unidades por defecto. Los deltas fraccionarios cuentan proporcionalmente. La respuesta empieza con el primer movimiento. Se agrupan los eventos por cuadro y se suavizan en una transición de 32 ms. El pellizco toma el nivel visible y cancela el movimiento pendiente de la rueda.
 
-- **Clic izquierdo + derecho** activa el modo en el último nivel de ampliación o al 150 % la primera vez. Al apagarlo vuelve al 100 %. El acorde se detecta sin modificadores y con hasta 45 ms entre pulsaciones. Las ventanas elevadas reciben los clics directamente. El clic central físico sigue disponible. **Win+clic central** vuelve rápidamente al 100 % y desactiva el modo. **Ctrl+Alt+rueda** selecciona la ventana anterior al girar hacia arriba y la siguiente al girar hacia abajo, sin desplegar un selector. Conserva cada muesca de una ráfaga, confirma la ventana activada antes de avanzar y descarta el recorrido pendiente al invertir. La cola está limitada a seis pasos y 200 ms para una rueda libre.
+- **Clic izquierdo + derecho** alterna el control de zoom del ratón y conserva el nivel actual. El acorde se detecta sin modificadores y con hasta 45 ms entre pulsaciones. Las ventanas elevadas reciben los clics directamente. Con el modo activo, **clic de rueda** o **Win+clic central** vuelven al 100 % y apagan el modo. La **rueda lateral** desplaza verticalmente si el modo está activo, como en el perfil de CachyOS del Keychron M6.
+- **Ctrl+Alt+rueda** recorre las ventanas, con confirmación de la ventana activada y descarte del recorrido pendiente al invertir. La cola se limita a seis pasos y 200 ms.
 - **Ctrl+Alt+clic central** maximiza/restaura y **Ctrl+Alt+clic derecho** minimiza la ventana actual únicamente si activas **Extra Ctrl+Alt mouse window actions**. Esas acciones adicionales están desactivadas por defecto.
 - **Win+«+»/«−»**, también en el numérico: el primer toque mantiene el paso nativo; tras 200 ms, la pulsación mantenida pasa a una trayectoria continua cuya velocidad aumenta gradualmente. Al soltar fija el nivel y la posición visibles, sin completar un objetivo lejano. Invertir el sentido parte del nivel visible.
 - Distingue el pellizco del movimiento de los tres dedos juntos. Los gestos de dos y cuatro dedos conservan su comportamiento.
@@ -29,7 +30,7 @@ Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantall
 - **Win+Esc** conserva el cierre de Windows. El mod no vuelve a abrir la Lupa por su temporizador; un nuevo pellizco puede iniciarla otra vez. El arranque en frío necesita abrir `Magnify.exe`. La rueda conserva como máximo una muesca durante 1,5 segundos; un reset, otro gesto o un cambio de sesión la descartan. No se reproduce una cola de giro libre al terminar de cargar. El pellizco conserva como máximo un primer aumento del 3 % durante 1,5 segundos, sólo mientras sigan los tres dedos en ese gesto; el resto del recorrido de espera se descarta.
 - No hay un límite propio de 400 %. Con `Maximum zoom = 0` se usa el rango nativo de esta Lupa, **100–1600 %**. Su motor tiene ese límite; el máximo teórico de la API independiente no amplía el rango del motor nativo.
 
-En OBS, selecciona **Captura de ventana** para compartir la aplicación a su escala normal. El marco es una capa independiente que solicita a Windows la exclusión de captura. Para compartir un monitor completo en OBS, selecciona el método **Moderno (WGC)**. En este equipo, DXGI sí capturó la ampliación.
+En OBS, selecciona **Captura de ventana** para compartir la aplicación a su escala normal. El marco usa DirectComposition con una textura estática de WARP para mantener sus cinco píxeles físicos en los cuatro bordes mientras cambia la ampliación o la posición de la vista. El marco solicita exclusión de captura. Para compartir un monitor completo en OBS, selecciona el método **Moderno (WGC)**. En este equipo, DXGI sí capturó la ampliación.
 
 ## Ajustes
 
@@ -40,10 +41,7 @@ En la pestaña **Ajustes** del mod:
 - **Ctrl+Alt + mouse wheel switches windows:** activado por defecto en el perfil Win.
 - **Extra Ctrl+Alt mouse window actions:** desactivado por defecto.
 - **Disable Magnifier click-to-read and its reading cursor:** activado por defecto en el binario verificado. Evita nuevas activaciones de Ctrl+Alt+clic izquierdo y de su cursor de lectura. No desactiva Narrador ni otros atajos de lectura de la Lupa. Si el modo de lectura ya estaba activo al cambiar el ajuste, sal de él o vuelve a abrir la Lupa.
-- **Wheel zoom per notch:** 50 % por defecto, ajustable entre 1 y 100 %.
-- **Wheel transition time:** 100 ms por defecto, ajustable entre 40 y 250 ms.
-- **Maximum normal wheel zoom growth per second:** 400 % de crecimiento por segundo por defecto (hasta multiplicar por cinco en un segundo), para movimientos normales y de precisión.
-- **Maximum free-spinning wheel zoom growth per second:** 1000 % por defecto (hasta multiplicar por once en un segundo) para ráfagas rápidas, con transición y recorrido pendiente de 40 ms. Usa el mayor de este límite y el normal; `0` desactiva la adaptación. Se detecta por unidades de rueda, no por número de eventos: subdividir una muesca en deltas pequeños no aumenta su ganancia. Este tiempo corresponde a la trayectoria del mod, no a una garantía de latencia física de Windows o de la pantalla.
+- **Wheel zoom per notch:** 20 % por defecto en instalaciones nuevas. Admite valores entre 1 y 100 %.
 - **Suppress Magnifier startup feedback cursor:** activado por defecto. Pide a Windows que omita el indicador azul al abrir la Lupa desde el mod; es una petición opcional que no impide abrirla si Windows la rechaza.
 
 - **Zoom sensitivity:** 100 % por defecto, seguimiento proporcional a la separación.
@@ -63,7 +61,7 @@ El seguimiento del ratón, el teclado, el texto y Narrador se configura en la Lu
 
 ## Instalación
 
-Descargas de la [0.8.0 en GitHub](https://github.com/calinrus-dev/better-magnifier/releases/tag/v0.8.0). Incluye el archivo de Windhawk, el código fuente, un paquete x64 compilado y `SHA256SUMS.txt` para comprobar las descargas.
+Descargas de la [0.8.3 en GitHub](https://github.com/calinrus-dev/better-magnifier/releases/tag/v0.8.3). Incluye el archivo de Windhawk, el código fuente, un paquete x64 compilado y `SHA256SUMS.txt` para comprobar las descargas.
 
 1. Descarga [`mods/kde-pinch-zoom.wh.cpp`](mods/kde-pinch-zoom.wh.cpp).
 2. En Windhawk, usa **Crear un nuevo Mod**, sustituye el ejemplo por el archivo completo y compila.
@@ -72,11 +70,11 @@ Descargas de la [0.8.0 en GitHub](https://github.com/calinrus-dev/better-magnifi
 
 El mod es local; no necesita publicarse en el catálogo de Windhawk. Al actualizar, sustituye el archivo completo para incluir los dos procesos de destino.
 
-Después de compilar también puedes ejecutar `scripts/install-local.ps1` en PowerShell **como administrador**. Está limitado a la instalación estándar de Windhawk y a `local@kde-pinch-zoom`. Conserva los ajustes existentes y añade los nuevos valores predeterminados. Por la integración solicitada, desactiva únicamente el antiguo `magnifier-headless`, conservándolo instalado. Cierra la Lupa de la sesión actual, restaura el 100 % e instala una DLL con nombre basado en su hash. Ante un fallo recupera la configuración previa. No modifica las claves de gestos del touchpad ni otros mods.
+Después de compilar también puedes ejecutar `scripts/install-local.ps1` en PowerShell **como administrador**. Está limitado a la instalación estándar de Windhawk y a `local@kde-pinch-zoom`. Conserva los ajustes existentes y añade los nuevos valores predeterminados. Por la integración solicitada, desactiva únicamente el antiguo `magnifier-headless`, conservándolo instalado. Instala una DLL con nombre basado en su hash. Si hay una versión anterior cargada, espera a que Windhawk la descargue de Explorer y la Lupa. Si sigue cargada, restaura la configuración previa. Windows conserva el control de los procesos y la vista durante la actualización. No modifica las claves de gestos del touchpad ni otros mods.
 
-Con el paquete `better-magnifier-0.8.0-windows-x64.zip`, extráelo completo y ejecuta ese script desde su carpeta en una consola de administrador; los binarios ya están compilados. Conserva las carpetas `build`, `mods` y `scripts` juntas. Para actualizar desde una versión anterior, usa el mismo mod local: el identificador sigue siendo `local@kde-pinch-zoom`, aunque el nombre visible sea Better Magnifier. Las revisiones intermedias 0.7.1–0.7.4 no se publicaron como releases.
+Con el paquete `better-magnifier-0.8.3-windows-x64.zip`, extráelo completo y ejecuta ese script desde su carpeta en una consola de administrador; los binarios ya están compilados. Conserva las carpetas `build`, `mods` y `scripts` juntas. Para actualizar desde una versión anterior, usa el mismo mod local: el identificador sigue siendo `local@kde-pinch-zoom`, aunque el nombre visible sea Better Magnifier. Las revisiones intermedias 0.7.1–0.7.4 no se publicaron como releases.
 
-`-Disable` desactiva este mod. `-WheelStep 50 -WheelFreeSpinMaxRate 1000` actualiza explícitamente la ganancia y el límite rápido de una instalación existente; sus otros ajustes se conservan. `-Acceleration 35 -MaximumZoom 0` permite cambiar esos dos ajustes explícitamente. El resultado queda en `build/install-result.json`. El instalador comprueba `build/build-info.json` para evitar instalar una DLL que no corresponda al código.
+`-Disable` desactiva este mod. `-WheelStep 20` aplica explícitamente el paso de 20 % en una instalación existente. `-Acceleration 35 -MaximumZoom 0` permite cambiar esos dos ajustes. El resultado queda en `build/install-result.json`. El instalador comprueba `build/build-info.json` para verificar el código y la DLL.
 
 ### Inicio de Windows
 
