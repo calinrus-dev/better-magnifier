@@ -40,48 +40,34 @@ $sourceText = Get-Content -LiteralPath $source -Raw -Encoding UTF8
 $id = [regex]::Match($sourceText, '(?m)^// @id\s+(\S+)').Groups[1].Value
 $version = [regex]::Match($sourceText, '(?m)^// @version\s+(\S+)').Groups[1].Value
 if ($id -ne 'kde-pinch-zoom' -or -not $version) { throw 'Metadatos del mod invalidos.' }
-$mouseTest = Join-Path $buildPath 'mouse-shortcut-tests.exe'
-Invoke-Compile 'mouse-shortcut-tests' ($common + @((Join-Path $projectRoot 'tests\mouse_shortcut_tests.cpp'), '-o', $mouseTest))
-& $mouseTest
-if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas de perfiles de raton ($LASTEXITCODE)." }
-$testExe = Join-Path $buildPath 'core-tests.exe'
-Invoke-Compile 'core-tests' ($common + @((Join-Path $projectRoot 'tests\core_tests.cpp'), '-o', $testExe))
-& $testExe
-if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas ($LASTEXITCODE)." }
+function Invoke-Test([string]$Name, [string]$Source, [string[]]$Flags = @(), [string[]]$Arguments = @()) {
+    $executable = Join-Path $buildPath "$Name.exe"
+    Invoke-Compile $Name ($common + @((Join-Path $projectRoot $Source), '-o', $executable) + $Flags)
+    $output = & $executable @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        $output | Write-Host
+        throw "Han fallado las pruebas de $Name ($LASTEXITCODE)."
+    }
+    $output | Select-Object -Last 1 | Write-Host
+    $output | ForEach-Object { Write-Verbose $_ }
+}
 
-$links = @('-lhid', '-lwtsapi32', '-lshell32', '-luser32', '-ladvapi32', '-ldwmapi', '-lole32')
+Invoke-Test 'mouse-shortcut-tests' 'tests\mouse_shortcut_tests.cpp'
+Invoke-Test 'core-tests' 'tests\core_tests.cpp'
+$links = @('-lhid', '-lwtsapi32', '-lshell32', '-luser32', '-ladvapi32', '-ldwmapi', '-lole32', '-lgdi32')
+$winFlags = @('-municode') + $links
 $hostExe = Join-Path $buildPath 'pinch-zoom-host.exe'
+$modDll = Join-Path $buildPath 'kde-pinch-zoom.dll'
 Invoke-Compile 'host' ($common + @('-DPINCH_ZOOM_STANDALONE', '-municode', $source, '-o', $hostExe) + $links)
 Invoke-Compile 'mod' ($common + @('-shared', '-Wl,--export-all-symbols', '-DWH_MOD', ('-DWH_MOD_ID=L"' + $id + '"'),
     ('-DWH_MOD_VERSION=L"' + $version + '"'), '-include', (Join-Path $WindhawkPath 'Compiler\include\windhawk_api.h'),
-    $source, $library, '-o', (Join-Path $buildPath 'kde-pinch-zoom.dll')) + $links)
-$runtimeTest = Join-Path $buildPath 'runtime-tests.exe'
-Invoke-Compile 'runtime-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\runtime_tests.cpp'),
-    '-o', $runtimeTest) + $links)
-& $runtimeTest (Join-Path $buildPath 'kde-pinch-zoom.dll')
-if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas de runtime/ABI ($LASTEXITCODE)." }
-$brokerTest = Join-Path $buildPath 'broker-tests.exe'
-Invoke-Compile 'broker-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\broker_tests.cpp'), '-o', $brokerTest) + $links)
-& $brokerTest
-if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas del broker de raton/teclado ($LASTEXITCODE)." }
-$adapterTest = Join-Path $buildPath 'native-adapter-tests.exe'
-Invoke-Compile 'native-adapter-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_adapter_tests.cpp'),
-    '-o', $adapterTest) + $links)
-& $adapterTest
-if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas del adaptador nativo ($LASTEXITCODE)." }
-$gateTest = Join-Path $buildPath 'native-gate-tests.exe'
-Invoke-Compile 'native-gate-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_gate_tests.cpp'),
-    '-o', $gateTest) + $links)
-& $gateTest
-if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas del filtro del shell ($LASTEXITCODE)." }
-$feedbackTest = Join-Path $buildPath 'launch-feedback-tests.exe'
-Invoke-Compile 'launch-feedback-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\launch_feedback_tests.cpp'), '-o', $feedbackTest) + $links)
-& $feedbackTest
-if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas de inicio sin feedback ($LASTEXITCODE)." }
-$holdTest = Join-Path $buildPath 'keyboard-hold-tests.exe'
-Invoke-Compile 'keyboard-hold-tests' ($common + @('-municode', (Join-Path $projectRoot 'tests\keyboard_hold_tests.cpp'), '-o', $holdTest) + $links)
-& $holdTest
-if ($LASTEXITCODE -ne 0) { throw "Han fallado las pruebas de teclado mantenido ($LASTEXITCODE)." }
+    $source, $library, '-o', $modDll) + $links)
+Invoke-Test 'runtime-tests' 'tests\runtime_tests.cpp' $winFlags @($modDll)
+Invoke-Test 'broker-tests' 'tests\broker_tests.cpp' $winFlags
+Invoke-Test 'native-adapter-tests' 'tests\native_adapter_tests.cpp' $winFlags
+Invoke-Test 'native-gate-tests' 'tests\native_gate_tests.cpp' $winFlags
+Invoke-Test 'launch-feedback-tests' 'tests\launch_feedback_tests.cpp' $winFlags
+Invoke-Test 'keyboard-hold-tests' 'tests\keyboard_hold_tests.cpp' $winFlags
 Invoke-Compile 'native-integration' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_integration.cpp'),
     '-o', (Join-Path $buildPath 'native-integration.exe')) + $links)
 Invoke-Compile 'native-performance' ($common + @('-municode', (Join-Path $projectRoot 'tests\native_performance.cpp'),

@@ -162,6 +162,7 @@ int wmain() {
                 {left, top, right, top + 5}, {left, bottom - 5, right, bottom},
                 {left, top + 5, left + 5, bottom - 5}, {right - 5, top + 5, right, bottom - 5}}};
             const auto edges = runtime::ZoomBorder::edges(screen, view);
+            constexpr RECT desktop{-1920, -320, 2560, 1440};
             for (std::size_t i = 0; i < edges.size(); ++i) {
                 const auto& edge = edges[i];
                 const auto& area = pixels[i];
@@ -177,6 +178,12 @@ int wmain() {
                         matrix._31 + matrix._11 <= edge.bounds.right - edge.bounds.left + epsilon &&
                         matrix._32 + matrix._22 <= edge.bounds.bottom - edge.bounds.top + epsilon,
                         "the native strip keeps the entire fractional visual in its client bounds");
+                const auto fixed = runtime::ZoomBorder::positionOnOverlay(edge, desktop);
+                const double fixedX = (desktop.left - view.x + static_cast<double>(fixed._31)) * view.zoom;
+                const double fixedY = (desktop.top - view.y + static_cast<double>(fixed._32)) * view.zoom;
+                require(std::abs(fixedX - area.left) < 0.005 && std::abs(fixedY - area.top) < 0.005 &&
+                        fixed._11 == matrix._11 && fixed._22 == matrix._22,
+                        "a fixed virtual-desktop surface makes pan and scale independent of HWND movement");
             }
         };
         const RECT primary{0, 0, 2559, 1439};
@@ -952,6 +959,17 @@ int wmain() {
         magnifier::messages(nullptr, magnifier::updateMessage, 0, 0);
         require(state.appliedSequence == 903 && state.nativeLevel == 23000,
                 "the committed request is delivered when its producer finishes publishing it");
+        state.down = 0; // The previous pinch ends.
+        state.down = 1; // A new pinch takes the next input epoch.
+        InterlockedIncrement(&state.inputRevision);
+        const int beforeSecondPinch = directWrites;
+        magnifier::change(renderer, 1.9f, nullptr);
+        require(directWrites == beforeSecondPinch && state.nativeLevel == 23000,
+                "a second pinch keeps the former pinch's delayed native callback from zooming backward during takeover");
+        deliver(10000, 904, bridge::InputSource::PinchWheel);
+        require(state.appliedSequence == 904 && state.nativeLevel == 10000 &&
+                state.currentSource == static_cast<LONG>(bridge::InputSource::PinchWheel),
+                "native recognizer ownership acknowledges a wheel-driven floor without discarding its origin");
     }
     std::cout << checks << " native adapter checks passed; fake backend; desktop unchanged\n";
 }

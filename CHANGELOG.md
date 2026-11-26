@@ -1,5 +1,13 @@
 # Cambios
 
+## 1.0.0 — 2026-11-26
+
+- Better Magnifier pasa a llamarse **Better Visual**. Las instalaciones locales conservan su identificador y sus ajustes.
+- La rueda conserva el modo activo al volver al 100 %. Un pellizco que vuelve al 100 % lo apaga. Al pasar de rueda a pellizco se descartan los movimientos pendientes y un gesto de ampliación conserva al menos el nivel confirmado por la Lupa.
+- El marco conserva cinco píxeles físicos. Se actualizan los cuatro lados juntos sin mover la ventana transparente durante la animación.
+- Tema oscuro para interfaces clásicas compatibles de Windows 11. Sigue el modo de aplicaciones de Windows y respeta el alto contraste.
+- Se unifica la ejecución de las pruebas y se conserva la salida detallada con `-Verbose`. El instalador toma los destinos de los metadatos y comprueba la descarga de la DLL anterior antes de cambiarla.
+
 ## 0.8.3 — 2026-11-26 (experimental)
 
 - El modo permanece encendido al terminar un pellizco mientras la vista siga ampliada y se apaga al volver al 100 %. El acorde manual conserva el nivel existente.

@@ -1,17 +1,28 @@
 // ==WindhawkMod==
 // @id              kde-pinch-zoom
-// @name            Better Magnifier
-// @name:es-ES      Better Magnifier
-// @description     KWin-inspired accessibility: smooth pinch and mouse-wheel zoom for native Windows Magnifier
-// @description:es-ES Accesibilidad inspirada en KWin: zoom fluido con pellizco y rueda para la Lupa nativa de Windows
-// @version         0.8.3
+// @name            Better Visual
+// @name:es-ES      Better Visual
+// @description     Smooth desktop zoom and system-aware dark mode for classic Windows interfaces
+// @description:es-ES Zoom fluido del escritorio y tema oscuro para interfaces clásicas de Windows
+// @version         1.0.0
 // @author          calinrus-dev
 // @github          https://github.com/calinrus-dev
 // @homepage        https://github.com/calinrus-dev/better-magnifier
 // @include         explorer.exe
 // @include         magnify.exe
+// @include         control.exe
+// @include         rundll32.exe
+// @include         mmc.exe
+// @include         regedit.exe
+// @include         OptionalFeatures.exe
+// @include         SystemPropertiesAdvanced.exe
+// @include         SystemPropertiesComputerName.exe
+// @include         SystemPropertiesHardware.exe
+// @include         SystemPropertiesPerformance.exe
+// @include         SystemPropertiesProtection.exe
+// @include         SystemPropertiesRemote.exe
 // @architecture    amd64
-// @compilerOptions -DNOMINMAX -static -lhid -lwtsapi32 -lshell32 -ladvapi32 -ldwmapi -lole32
+// @compilerOptions -DNOMINMAX -static -lhid -lwtsapi32 -lshell32 -ladvapi32 -ldwmapi -lole32 -lgdi32
 // @license         GPL-3.0-or-later
 // ==/WindhawkMod==
 
@@ -22,15 +33,20 @@
 
 // ==WindhawkModReadme==
 /*
-# Better Magnifier - experimental
+# Better Visual
 
 Spread three fingers to magnify the desktop; pinch them together to zoom out.
 A red screen outline indicates that mouse zoom controls are active. A
 three-finger pinch keeps this mode active after release while zoomed in.
-Returning to 100% turns the mode off. Press both mouse buttons together to
+Returning to 100% by pinching turns the mode off. The wheel stays armed at
+100% so you can reverse direction. Press both mouse buttons together to
 toggle it without changing the current scale. In this mode the main wheel
 zooms, its click resets, and the side wheel scrolls vertically. Win+plus/minus
 also works with the numeric keypad. Use WGC to share at normal scale.
+
+The classic Windows theme follows the system apps theme and contrast themes.
+Supported Control Panel views, Windows property dialogs and popup menus
+can use dark surfaces while following the Windows app theme.
 Ctrl+Alt+wheel switches windows. The mouse profile is configurable.
 Two-finger app zoom and Windows three/four-finger swipe settings are untouched.
 A Precision Touchpad and Windows build 26200 are required. A companion in
@@ -57,7 +73,10 @@ https://github.com/calinrus-dev/better-magnifier
 // ==WindhawkModSettings==
 /*
 - enabled: true
-  $name: Enabled
+  $name: Enable desktop zoom
+- darkLegacyWindows: true
+  $name: Dark mode for classic Windows interfaces
+  $description: Follows Windows app mode and preserves Windows contrast themes.
 - observeOnly: false
   $name: Observe only (recognition without zoom)
 - sensitivity: 100
@@ -301,6 +320,7 @@ struct Decision {
     Phase phase = Phase::Idle;
     std::optional<double> zoom;
     bool began = false;
+    bool beganEnlarging = false;
 };
 
 inline double wheelZoomLevel(double base, int delta, int step, double maximum) {
@@ -330,9 +350,10 @@ public:
     void adoptZoom(double zoom) {
         if (std::isfinite(zoom) && zoom >= 1) zoom_ = zoom;
     }
-    double wheelZoom(int delta, int step, double maximum) {
+    std::optional<double> wheelZoom(int delta, int step, double maximum) {
+        const auto previous = std::llround(zoom_ * 10000);
         zoom_ = wheelZoomLevel(zoom_, delta, step, maximum);
-        return zoom_;
+        return std::llround(zoom_ * 10000) != previous ? std::optional{zoom_} : std::nullopt;
     }
     Decision update(std::span<const Contact> frame, std::uint64_t now,
                     double currentZoom, const Config& config, double elapsedMs = -1) {
@@ -428,7 +449,7 @@ public:
         // Integrate from the clamped value so reversing at 100% or the maximum
         // responds on the very next frame instead of traversing a dead zone.
         zoom_ = std::clamp(zoom_ * std::exp(delta * config.sensitivity * boost), 1.0, config.maxZoom);
-        return {phase_, zoom_, began};
+        return {phase_, zoom_, began, began && ((scale > 1) != config.invertPinch)};
     }
 };
 
@@ -808,6 +829,7 @@ constexpr bool overviewAllowed(std::uint32_t native, std::uint32_t gate) {
 #include <dwmapi.h>
 #include <hidpi.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <objbase.h>
 #include <servprov.h>
 #include <new>
@@ -815,6 +837,7 @@ constexpr bool overviewAllowed(std::uint32_t native, std::uint32_t gate) {
 #include <wrl/client.h>
 #include <atomic>
 #include <cstdio>
+#include <cwchar>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -912,10 +935,12 @@ bool resolve(HMODULE module, Kind kind, void** targets, std::size_t count) {
 } // namespace binary_profiles
 
 namespace bridge {
-enum class InputSource : LONG { None = 0, Pinch = 1, Wheel = 2, Keyboard = 3, Reset = 4 };
+enum class InputSource : LONG { None = 0, Pinch = 1, Wheel = 2, Keyboard = 3, Reset = 4, PinchWheel = 5 };
+inline bool pinchSource(InputSource source) { return source == InputSource::Pinch || source == InputSource::PinchWheel; }
+inline bool wheelSource(InputSource source) { return source == InputSource::Wheel || source == InputSource::PinchWheel; }
 inline volatile LONG* desktopRaised = nullptr;
-constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v17";
-constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v17";
+constexpr wchar_t kMapping[] = L"Local\\KdePinchZoom.NativeGate.v18";
+constexpr wchar_t kWake[] = L"Local\\KdePinchZoom.NativeWake.v18";
 struct alignas(8) Record {
     volatile LONG phase;
     volatile LONG down;
@@ -994,6 +1019,10 @@ struct alignas(8) Record {
 };
 inline bool pinchDown(const Record& record) {
     return record.down && record.phase == static_cast<LONG>(pinch::Phase::Pinch);
+}
+inline bool pendingLevel(const Record& record) {
+    return record.requestedSequence != record.appliedSequence && record.requestInputRevision == record.inputRevision &&
+           record.requestRevision == record.zoomRevision;
 }
 inline bool pinchFrameFresh(Record& record, std::uint64_t now) {
     const auto captured = static_cast<std::uint64_t>(InterlockedCompareExchange64(&record.pinchFrameTime, 0, 0));
@@ -1314,9 +1343,7 @@ private:
     static constexpr wchar_t kClassName[] = L"BetterMagnifier.ZoomBorder";
 
     struct Strip {
-        HWND window;
-        Edge edge;
-        Microsoft::WRL::ComPtr<IDCompositionTarget> target;
+        D2D_MATRIX_3X2_F transform;
         Microsoft::WRL::ComPtr<IDCompositionVisual> visual;
     };
     struct Graphics {
@@ -1333,14 +1360,18 @@ private:
         SystemModule dcomp{L"dcomp.dll"};
         Microsoft::WRL::ComPtr<IDCompositionDevice> compositor;
         Microsoft::WRL::ComPtr<IDCompositionSurface> redPixel;
+        Microsoft::WRL::ComPtr<IDCompositionTarget> target;
+        Microsoft::WRL::ComPtr<IDCompositionVisual> root;
     };
     HINSTANCE module_ = nullptr;
     HWND target_ = nullptr;
     UINT topologyMessage_ = 0;
+    HWND overlay_ = nullptr;
+    RECT desktop_{};
     std::shared_ptr<Graphics> graphics_;
     std::vector<Strip> strips_;
     std::vector<RECT> monitors_;
-    std::vector<Edge> frame_;
+    std::vector<D2D_MATRIX_3X2_F> frame_;
     std::optional<pinch::View> lastView_;
     bool registered_ = false;
     bool displayPosted_ = false, devicePosted_ = false;
@@ -1392,28 +1423,29 @@ private:
         return TRUE;
     }
 
-    void clearWindows() {
-        const auto graphics = graphics_; // A nested close must not unload dependencies of the moved strips.
-        for (auto& strip : std::exchange(strips_, {})) {
-            strip.target.Reset();
-            strip.visual.Reset();
-            DestroyWindow(strip.window);
+    void clearOverlay() {
+        const auto graphics = graphics_;
+        strips_.clear();
+        if (graphics) {
+            graphics->target.Reset();
+            graphics->root.Reset();
         }
+        if (const HWND window = std::exchange(overlay_, nullptr)) DestroyWindow(window);
     }
 
-    HWND createStrip(const RECT& edge, ReadBand readBand, CreateInBand createInBand) {
+    HWND createOverlay(ReadBand readBand, CreateInBand createInBand) {
         constexpr DWORD ex = WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT |
                              WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP;
         constexpr DWORD uiAccessBand = 2;
-        const auto width = edge.right - edge.left, height = edge.bottom - edge.top;
+        const auto width = desktop_.right - desktop_.left, height = desktop_.bottom - desktop_.top;
         DWORD band = 0;
         // Use Magnify's existing UIAccess band to stay above desktop windows.
-        auto window = CreateWindowExW(ex, kClassName, L"", WS_POPUP, edge.left, edge.top, width, height,
+        auto window = CreateWindowExW(ex, kClassName, L"", WS_POPUP, desktop_.left, desktop_.top, width, height,
                                       nullptr, nullptr, module_, this);
         if (window && readBand(window, &band) && band == uiAccessBand) return window;
         if (window) DestroyWindow(window);
         if (!createInBand) return nullptr;
-        window = createInBand(ex, kClassName, L"", WS_POPUP, edge.left, edge.top, width, height,
+        window = createInBand(ex, kClassName, L"", WS_POPUP, desktop_.left, desktop_.top, width, height,
                               nullptr, nullptr, module_, this, uiAccessBand);
         if (window && readBand(window, &band) && band == uiAccessBand) return window;
         if (window) DestroyWindow(window);
@@ -1466,36 +1498,28 @@ private:
         if (!registerClass() || (!graphics_ && !createRedPixel())) return false;
         const auto graphics = graphics_;
         const auto frame = frame_;
-        for (const auto& edge : frame) {
-            const auto window = createStrip(edge.bounds, readBand, createInBand);
-            if (!window) return false;
-            if (!target_) { DestroyWindow(window); return false; }
-            strips_.push_back({window, edge, {}, {}});
-            DWORD affinity = WDA_NONE;
-            if (!SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA) ||
-                !SetWindowDisplayAffinity(window, WDA_EXCLUDEFROMCAPTURE) ||
-                !GetWindowDisplayAffinity(window, &affinity) || affinity != WDA_EXCLUDEFROMCAPTURE)
-                return false;
-            Microsoft::WRL::ComPtr<IDCompositionTarget> target;
+        overlay_ = createOverlay(readBand, createInBand);
+        if (!overlay_ || !target_) return false;
+        DWORD affinity = WDA_NONE;
+        if (!SetLayeredWindowAttributes(overlay_, 0, 255, LWA_ALPHA) ||
+            !SetWindowDisplayAffinity(overlay_, WDA_EXCLUDEFROMCAPTURE) ||
+            !GetWindowDisplayAffinity(overlay_, &affinity) || affinity != WDA_EXCLUDEFROMCAPTURE ||
+            FAILED(graphics->compositor->CreateTargetForHwnd(overlay_, TRUE, &graphics->target)) ||
+            FAILED(graphics->compositor->CreateVisual(&graphics->root))) return false;
+        for (const auto& transform : frame) {
             Microsoft::WRL::ComPtr<IDCompositionVisual> visual;
-            if (FAILED(graphics->compositor->CreateTargetForHwnd(window, TRUE, &target)) ||
-                FAILED(graphics->compositor->CreateVisual(&visual)) ||
+            if (FAILED(graphics->compositor->CreateVisual(&visual)) ||
                 FAILED(visual->SetContent(graphics->redPixel.Get())) ||
                 FAILED(visual->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD)) ||
                 FAILED(visual->SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR)) ||
-                FAILED(visual->SetTransform(edge.transform)) ||
-                FAILED(target->SetRoot(visual.Get())) || !target_) return false;
-            strips_.back().target = std::move(target);
-            strips_.back().visual = std::move(visual);
+                FAILED(visual->SetTransform(transform)) ||
+                FAILED(graphics->root->AddVisual(visual.Get(), TRUE, nullptr)) || !target_) return false;
+            strips_.push_back({transform, std::move(visual)});
         }
-        if (FAILED(graphics->compositor->Commit()) || !target_) return false;
-        // Every strip has accepted capture exclusion before any is shown.
-        const auto windows = strips_;
-        for (const auto& strip : windows) {
-            if (!target_) return false;
-            ShowWindow(strip.window, SW_SHOWNOACTIVATE);
-        }
-        return !strips_.empty();
+        if (FAILED(graphics->target->SetRoot(graphics->root.Get())) ||
+            FAILED(graphics->compositor->Commit()) || !target_) return false;
+        ShowWindow(overlay_, SW_SHOWNOACTIVATE);
+        return true;
     }
 
     static bool sameTransform(const D2D_MATRIX_3X2_F& first, const D2D_MATRIX_3X2_F& second) {
@@ -1504,36 +1528,26 @@ private:
 
     bool move() {
         const auto graphics = graphics_;
-        bool changedBounds = false, changedTransform = false;
+        bool changedTransform = false;
         for (std::size_t index = 0; index < strips_.size(); ++index) {
             const auto& strip = strips_[index];
             const auto& next = frame_[index];
-            changedBounds |= !EqualRect(&strip.edge.bounds, &next.bounds);
-            if (!sameTransform(strip.edge.transform, next.transform)) {
-                if (FAILED(strip.visual->SetTransform(next.transform))) return false;
+            if (!sameTransform(strip.transform, next)) {
+                if (FAILED(strip.visual->SetTransform(next))) return false;
                 changedTransform = true;
             }
         }
-        if (changedBounds) {
-            HDWP batch = BeginDeferWindowPos(static_cast<int>(strips_.size()));
-            for (std::size_t index = 0; batch && index < strips_.size(); ++index) {
-                const auto& strip = strips_[index];
-                const auto& bounds = frame_[index].bounds;
-                if (EqualRect(&strip.edge.bounds, &bounds)) continue;
-                batch = DeferWindowPos(batch, strip.window, nullptr, bounds.left, bounds.top,
-                                       bounds.right - bounds.left, bounds.bottom - bounds.top,
-                                       SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER);
-            }
-            if (!batch || !EndDeferWindowPos(batch) || !target_) return false;
-        }
+        // Panning and scaling move visuals in the same compositor transaction.
+        // The capture-excluded HWND never moves while the zoom transform changes.
         if (changedTransform && FAILED(graphics->compositor->Commit())) return false;
-        for (std::size_t index = 0; index < strips_.size(); ++index) strips_[index].edge = frame_[index];
+        for (std::size_t index = 0; index < strips_.size(); ++index) strips_[index].transform = frame_[index];
         return true;
     }
 
     void resetFrame() {
-        clearWindows();
+        clearOverlay();
         graphics_.reset();
+        desktop_ = {};
         monitors_.clear();
         frame_.clear();
         lastView_.reset();
@@ -1571,6 +1585,12 @@ public:
                 makeEdge({left, bottom - thickness, right, bottom}),
                 makeEdge({left, top + thickness, left + thickness, bottom - thickness}),
                 makeEdge({right - thickness, top + thickness, right, bottom - thickness})};
+    }
+    static D2D_MATRIX_3X2_F positionOnOverlay(const Edge& edge, const RECT& desktop) {
+        auto result = edge.transform;
+        result._31 += static_cast<float>(edge.bounds.left - desktop.left);
+        result._32 += static_cast<float>(edge.bounds.top - desktop.top);
+        return result;
     }
     void initialize(HINSTANCE module, HWND target, UINT topologyMessage) {
         module_ = module;
@@ -1619,23 +1639,28 @@ public:
         if (lastView_ && scale == lastView_->zoom && x == lastView_->x && y == lastView_->y) return;
         const PerMonitorDpi dpi;
         if (!dpi) { failed(); return; }
-        if (monitors_.empty() && !EnumDisplayMonitors(nullptr, nullptr, addMonitor, reinterpret_cast<LPARAM>(&monitors_))) {
-            failed();
-            return;
+        if (monitors_.empty()) {
+            if (!EnumDisplayMonitors(nullptr, nullptr, addMonitor, reinterpret_cast<LPARAM>(&monitors_)) || monitors_.empty()) {
+                failed();
+                return;
+            }
+            desktop_ = monitors_.front();
+            for (const auto& monitor : monitors_) UnionRect(&desktop_, &desktop_, &monitor);
         }
         const pinch::View view{scale, x, y};
         lastView_ = view;
         frame_.clear();
         for (const auto& monitor : monitors_) {
             for (const auto& edge : edges(monitor, view)) {
-                if (edge.bounds.left < edge.bounds.right && edge.bounds.top < edge.bounds.bottom) frame_.push_back(edge);
+                if (edge.bounds.left < edge.bounds.right && edge.bounds.top < edge.bounds.bottom)
+                    frame_.push_back(positionOnOverlay(edge, desktop_));
             }
         }
         if (frame_.empty()) { failed(); return; }
         if (frame_.size() == strips_.size()) {
             if (!move() && target_) failed();
         } else {
-            clearWindows();
+            clearOverlay();
             if (target_ && !build() && target_) failed();
         }
     }
@@ -1806,18 +1831,22 @@ public:
         return read().value_or(pinch::View{}).zoom;
     }
     double rendered() const { return read().value_or(pinch::View{}).zoom; }
-    double pinchStartLevel() const {
-        if (!nativeActive()) return current();
+    double pinchStartLevel(bool enlarging) const {
+        const double acknowledged = current();
+        if (!nativeActive()) return acknowledged;
         const auto& state = *native_.get();
-        if (state.overviewSavedLevel > 0) return current();
+        if (state.overviewSavedLevel > 0) return acknowledged;
         const auto wheel = static_cast<LONG>(bridge::InputSource::Wheel);
-        if (state.currentSource == wheel ||
+        if (enlarging || state.currentSource == wheel ||
             (state.requestSource == wheel && state.requestedSequence != state.appliedSequence)) {
             const auto visible = read();
-            if (visible && std::isfinite(visible->zoom) && visible->zoom >= 1 && visible->zoom <= 16)
-                return visible->zoom;
+            if (visible && std::isfinite(visible->zoom) && visible->zoom >= 1 && visible->zoom <= 16) {
+                // A composition sample can lag the accepted native target.
+                // Taking over an outward gesture must never request a decrease.
+                return enlarging ? std::max(acknowledged, visible->zoom) : visible->zoom;
+            }
         }
-        return current();
+        return acknowledged;
     }
     unsigned revision() const { return revision_; }
     bool resetToNormal() {
@@ -2494,7 +2523,7 @@ class Host {
     int coldWheelDelta_ = 0;
     std::uint64_t coldWheelDeadline_ = 0;
     LONG coldWheelCommands_ = 0;
-    bool manualZoomMode_ = false, zoomModePublished_ = false;
+    bool zoomModeLatched_ = false, zoomModePublished_ = false;
     bool previousMagnified_ = false, pinchReachedNormal_ = false;
     struct ModeSuppression { LONG level, commands, sequence; };
     std::optional<ModeSuppression> modeSuppression_;
@@ -2511,7 +2540,7 @@ class Host {
         }
     }
     void disarmZoomMode() {
-        manualZoomMode_ = false;
+        zoomModeLatched_ = false;
         if (const auto* state = bridge_.get())
             modeSuppression_ = ModeSuppression{state->overviewSavedLevel > 0 ? state->overviewSavedLevel : state->nativeLevel,
                                                state->nativeCommands, state->requestedSequence};
@@ -2526,32 +2555,33 @@ class Host {
         }
         const LONG level = state->overviewSavedLevel > 0 ? state->overviewSavedLevel : state->nativeLevel;
         const bool magnified = level > 10000;
+        const auto source = static_cast<bridge::InputSource>(state->currentSource);
         if (!magnified && previousMagnified_) {
-            manualZoomMode_ = false;
-            pinchReachedNormal_ = true;
+            if (bridge::pendingLevel(*state)) return; // The applied source can lag the level until the native update is acknowledged.
+            zoomModeLatched_ = !modeSuppression_ && bridge::wheelSource(source);
+            pinchReachedNormal_ = !zoomModeLatched_;
             modeSuppression_.reset();
         }
         previousMagnified_ = magnified;
         if (modeSuppression_ && magnified && level != modeSuppression_->level && !state->pendingCommand) {
-            const auto source = static_cast<bridge::InputSource>(state->currentSource);
             const bool freshKeyboard = source == bridge::InputSource::Keyboard && state->nativeCommands != modeSuppression_->commands;
             const bool freshWheel = source == bridge::InputSource::Wheel &&
                 state->appliedSequence != modeSuppression_->sequence && state->appliedSequence == state->requestedSequence &&
                 state->requestInputRevision == state->inputRevision && state->requestSource == static_cast<LONG>(source);
             if (freshKeyboard || freshWheel) modeSuppression_.reset();
         }
-        publishZoomMode(!modeSuppression_ && (manualZoomMode_ || magnified ||
+        publishZoomMode(!modeSuppression_ && (zoomModeLatched_ || magnified ||
                         (bridge::pinchDown(*state) && !pinchReachedNormal_)));
     }
     void toggleZoomMode(std::uint64_t now) {
         if (!zoomInputEnabled() || !config_.smoothWheel) return;
         updateZoomMode();
-        if (zoomModePublished_ || manualZoomMode_) {
+        if (zoomModePublished_ || zoomModeLatched_) {
             disarmZoomMode();
             cancelWheel();
         } else {
             ensureNativeMagnifier(now, true);
-            manualZoomMode_ = true;
+            zoomModeLatched_ = true;
             modeSuppression_.reset();
             updateZoomMode();
         }
@@ -2642,15 +2672,14 @@ class Host {
         if (bridge::pinchDown(*state)) {
             const auto active = devices_.find(activeDevice_);
             if (active == devices_.end() || !bridge_.gateAvailable()) return;
-            const auto level = active->second.recognizer.wheelZoom(delta, config_.wheelStep, config_.maxZoom);
-            zoom_.target(level);
+            if (const auto level = active->second.recognizer.wheelZoom(delta, config_.wheelStep, config_.maxZoom))
+                zoom_.target(*level, false, bridge::InputSource::PinchWheel);
             return;
         }
         if (wheelRevision_ != state->inputRevision) cancelWheel(false);
         wheelRevision_ = state->inputRevision;
-        const bool pinchQueued = state->requestSource == static_cast<LONG>(bridge::InputSource::Pinch) &&
-                                 state->requestedSequence != state->appliedSequence &&
-                                 state->requestInputRevision == wheelRevision_ && state->requestRevision == state->zoomRevision;
+        const bool pinchQueued = bridge::pinchSource(static_cast<bridge::InputSource>(state->requestSource)) &&
+                                 bridge::pendingLevel(*state);
         const double base = pinchQueued ? state->requestedLevel / 10000.0 : zoom_.current();
         wheel_.add(delta, base, config_.wheelStep, config_.maxZoom);
         wheelDeadline_ = now + 200;
@@ -3083,7 +3112,7 @@ class Host {
         }
         if (decision.began) {
             if (!config_.observeOnly && phase == pinch::Phase::Pinch) {
-                const double base = std::clamp(zoom_.pinchStartLevel(), 1.0, effective.maxZoom);
+                const double base = std::clamp(zoom_.pinchStartLevel(decision.beganEnlarging), 1.0, effective.maxZoom);
                 cancelWheel();
                 modeSuppression_.reset();
                 pinchReachedNormal_ = false;
@@ -3126,7 +3155,14 @@ class Host {
                 dev.waitingForNative = true;
                 return;
             }
-            if (!config_.observeOnly && !zoom_.target(*decision.zoom, decision.began)) {
+            const auto* state = bridge_.get();
+            // Further reports at the same floor must not overwrite the wheel
+            // as the actor that reached it before the native update can land.
+            const bool sameWheelFloor = state && !decision.began && std::llround(*decision.zoom * 10000) == 10000 &&
+                state->requestedLevel == 10000 && state->requestInputRevision == state->inputRevision &&
+                state->requestRevision == state->zoomRevision &&
+                state->requestSource == static_cast<LONG>(bridge::InputSource::PinchWheel);
+            if (!config_.observeOnly && !sameWheelFloor && !zoom_.target(*decision.zoom, decision.began)) {
                 dev.recognizer.reset();
                 activeDevice_ = nullptr;
             }
@@ -3353,11 +3389,11 @@ public:
         : config_(config), readSettings_(readSettings) {}
     bool initialize(HINSTANCE module, HANDLE controllerStop = nullptr) {
         if (!runtimeLease_.acquire(L"Local\\BetterMagnifier.HostOwner")) {
-            log(L"A Better Magnifier host already owns this session.");
+            log(L"A Better Visual host already owns this session.");
             return false;
         }
 #ifdef PINCH_ZOOM_STANDALONE
-        if (FindWindowW(kClassName, L"Better Magnifier")) {
+        if (FindWindowW(kClassName, nullptr)) {
             log(L"The Windhawk host is already running. Use --status for an active installation.");
             return false;
         }
@@ -3375,7 +3411,7 @@ public:
         if (!RegisterClassW(&windowClass)) return false;
         windowClassModule_ = module;
         // Hidden top-level window also receives session and power broadcasts.
-        window_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClassName, L"Better Magnifier",
+        window_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClassName, L"Better Visual",
                                   WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, module, this);
         if (!window_) return false;
 #ifdef PINCH_ZOOM_STANDALONE
@@ -3834,7 +3870,7 @@ unsigned ownerWorkerStartCount = 0;
 std::atomic<HWND> messageWindow{nullptr};
 std::atomic<bool> stopping{false};
 std::atomic<unsigned> activeUpdates{0};
-constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v17";
+constexpr wchar_t kNativeClass[] = L"KdePinchZoomNativeTarget.v18";
 std::atomic<DWORD> uiThread{0};
 std::atomic<void*> nativeSelf{nullptr}; // Dereferenced only on the native rendering thread.
 std::atomic<bool> uiControlReady{false};
@@ -3842,6 +3878,7 @@ std::atomic<bool> uiPrimeBlocked{false}; // A failed UI prime waits for a real n
 thread_local bool applyingPinch = false;
 thread_local bool applyingTouchpadPinch = false;
 thread_local unsigned nativeCommandDepth = 0;
+thread_local bridge::InputSource nativeCommandSource = bridge::InputSource::None;
 thread_local bool nativeTargetObserved = false;
 thread_local float nativeObservedTarget = 1;
 // A renderer callback is not necessarily a new command: native animation can
@@ -3884,10 +3921,10 @@ bool isManagedTargetEcho(void* renderer) {
     }
     const LONG revision = state->inputRevision;
     if (revision != managedTarget->revision) {
-        // The first pinch frame invalidates the wheel epoch before its target
-        // reaches this UI thread. Keep filtering the old wheel's callbacks in
-        // that gap, without taking control away from an explicit native key.
-        if (managedTarget->source != bridge::InputSource::Wheel || !bridge::pinchDown(*state) ||
+        // A new pinch invalidates the previous epoch before its first target
+        // reaches the UI thread. Keep blocking old managed callbacks in that
+        // gap; explicit native commands release their leases independently.
+        if (!bridge::pinchDown(*state) ||
             static_cast<std::uint32_t>(revision) - static_cast<std::uint32_t>(managedTarget->revision) != 1u) {
             managedTarget.reset();
             return false;
@@ -3920,7 +3957,7 @@ decltype(&PostMessageW) keyboardPostMessage = PostMessageW;
 void cancelKeyboardHold(bool seal = true);
 bool freezeKeyboardHold();
 void pollKeyboardHold();
-const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v17");
+const UINT updateMessage = RegisterWindowMessageW(L"KdePinchZoom.NativeTarget.v18");
 constexpr UINT kClaimNativeOwner = WM_APP + 0x62;
 constexpr UINT kRefreshZoomBorder = WM_APP + 0x63;
 constexpr UINT kRefreshNativeVisibility = WM_APP + 0x64;
@@ -4180,6 +4217,8 @@ void change(void* self, float level, POINT* point) {
         nativeObservedTarget = level;
     }
     originalChange(self, level, point); // Native animation retains ownership until managed takeover.
+    if (synchronousCommand || unobservedCommand)
+        InterlockedExchange(&mapping.get()->currentSource, static_cast<LONG>(nativeCommandSource));
     if (!observed || applyingPinch || synchronousCommand) publish(level);
     rendererGeneration.fetch_add(1);
     if (unobservedCommand && std::abs(level * 10000.0 - before) >= 1) {
@@ -4228,21 +4267,26 @@ BOOL WINAPI clipCursor(const RECT* rectangle) {
 }
 struct NativeCommandScope {
     bool previous = applyingPinch;
+    bridge::InputSource previousSource = nativeCommandSource;
     unsigned rendererBefore = rendererGeneration.load();
-    NativeCommandScope() {
-        if (!nativeCommandDepth) nativeTargetObserved = false;
+    explicit NativeCommandScope(bridge::InputSource source = bridge::InputSource::Keyboard) {
+        if (!nativeCommandDepth) {
+            nativeTargetObserved = false;
+            nativeCommandSource = source;
+        }
         ++nativeCommandDepth; applyingPinch = false;
     }
-    ~NativeCommandScope() { applyingPinch = previous; --nativeCommandDepth; }
+    ~NativeCommandScope() { applyingPinch = previous; nativeCommandSource = previousSource; --nativeCommandDepth; }
 };
-void nativeCommandComplete(unsigned /*rendererBefore*/, bridge::InputSource source = bridge::InputSource::Keyboard) {
+void nativeCommandComplete(unsigned /*rendererBefore*/) {
     if (applyingPinch || nativeCommandDepth != 1) return; // One epoch per outermost command.
     void* keeper = nullptr;
     if (FAILED(getKeeper(&keeper)) || !keeper) return;
     // A synchronous setter is an intentional command result, even if the UI
     // cache lags behind it. Only unscoped animation callbacks are stale echoes.
-    publish(nativeTargetObserved ? nativeObservedTarget : getOption(keeper, 14) / 100.0f);
-    InterlockedExchange(&mapping.get()->currentSource, static_cast<LONG>(source));
+    const float level = nativeTargetObserved ? nativeObservedTarget : getOption(keeper, 14) / 100.0f;
+    InterlockedExchange(&mapping.get()->currentSource, static_cast<LONG>(nativeCommandSource));
+    publish(level);
     InterlockedExchange(&mapping.get()->appliedSequence, mapping.get()->requestedSequence);
     InterlockedIncrement(&mapping.get()->inputRevision);
     InterlockedExchange(&mapping.get()->wheelActive, 0);
@@ -4513,9 +4557,9 @@ void wheel(void* self, int delta) {
     }
     releaseManagedTarget();
     resumeForNativeCommand();
-    NativeCommandScope scope;
+    NativeCommandScope scope(bridge::InputSource::Wheel);
     originalWheel(self, delta); // Lens, opt-out and an absent host retain native behavior.
-    nativeCommandComplete(scope.rendererBefore, bridge::InputSource::Wheel);
+    nativeCommandComplete(scope.rendererBefore);
 }
 
 void option(void* self, int name, long value, bool save) {
@@ -4672,7 +4716,7 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
         if ((action || sequence != previousAck) && (state->controlEnabled || action == 3)) {
             if (!action && !sameRequest()) return 0;
             const bool stale = !action && (requestRevision != state->zoomRevision || !stillOwnsInput());
-            const bool explicitSource = source == bridge::InputSource::Pinch || source == bridge::InputSource::Wheel ||
+            const bool explicitSource = bridge::pinchSource(source) || source == bridge::InputSource::Wheel ||
                                         source == bridge::InputSource::Keyboard || source == bridge::InputSource::Reset;
             if (stale || !explicitSource) {
                 acknowledge();
@@ -4748,7 +4792,7 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
                     bool previousTouchpad = applyingTouchpadPinch;
                     explicit Applying(bridge::InputSource source) {
                         applyingPinch = true;
-                        applyingTouchpadPinch = source == bridge::InputSource::Pinch;
+                        applyingTouchpadPinch = bridge::pinchSource(source);
                     }
                     ~Applying() { applyingPinch = previous; applyingTouchpadPinch = previousTouchpad; }
                 } applying(source);
@@ -4798,8 +4842,8 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
                     originalChange(nativeSelf, static_cast<float>(level), nullptr);
                 }
             }
-            publish(static_cast<float>(delivered));
             InterlockedExchange(&state->currentSource, static_cast<LONG>(source));
+            publish(static_cast<float>(delivered));
             if (prime) InterlockedIncrement(&state->zoomRevision);
             InterlockedExchange(&state->nativeError, 0);
             acknowledge();
@@ -5545,6 +5589,687 @@ void start() {
 }
 }  // namespace controller
 
+// Native popup menus. UxTheme ordinals are private and must match the offline
+// profile on Windows builds for which their entry points have been verified.
+namespace dark_menus {
+
+enum class AppMode : int { Default, AllowDark, ForceDark, ForceLight };
+using SetPreferredAppMode = AppMode(WINAPI*)(AppMode);
+using FlushMenuThemes = void(WINAPI*)();
+constexpr binary_profiles::Identity uxThemeIdentity{{
+    0xdf, 0x08, 0xce, 0xf3, 0x7e, 0x66, 0x88, 0xf1, 0x9a, 0x17, 0x30, 0x53, 0x6c, 0x35, 0x74, 0xd4},
+    1, 0xa7000, 0xdb08095c};
+
+std::atomic<bool> enabled{false};
+std::mutex themeMutex;
+HMODULE uxTheme = nullptr;
+SetPreferredAppMode setAppMode = nullptr;
+FlushMenuThemes flushMenus = nullptr;
+std::optional<AppMode> savedMode;
+decltype(&TrackPopupMenu) originalPopup = nullptr;
+decltype(&TrackPopupMenuEx) originalPopupEx = nullptr;
+
+bool supportedHost(const wchar_t* image) {
+    if (!image) return false;
+    wchar_t windows[MAX_PATH];
+    const auto count = GetSystemWindowsDirectoryW(windows, ARRAYSIZE(windows));
+    if (!count || count >= ARRAYSIZE(windows)) return false;
+    const std::wstring directory(windows, count);
+    return _wcsicmp(image, (directory + L"\\explorer.exe").c_str()) == 0 ||
+           _wcsicmp(image, (directory + L"\\regedit.exe").c_str()) == 0 ||
+           _wcsicmp(image, (directory + L"\\System32\\mmc.exe").c_str()) == 0;
+}
+
+bool systemDark() {
+    HIGHCONTRASTW contrast{};
+    contrast.cbSize = sizeof(contrast);
+    if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) ||
+        (contrast.dwFlags & HCF_HIGHCONTRASTON))
+        return false;
+    DWORD light = 1, size = sizeof(light);
+    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                        L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size) == ERROR_SUCCESS &&
+           size == sizeof(light) && light == 0;
+}
+
+void applyLocked(bool dark) {
+    if (!setAppMode || !flushMenus || dark == savedMode.has_value()) return;
+    if (dark) {
+        savedMode = setAppMode(AppMode::AllowDark);
+    } else {
+        setAppMode(*savedMode);
+        savedMode.reset();
+    }
+    flushMenus();
+}
+
+void sync() {
+    const std::unique_lock lock(themeMutex, std::try_to_lock);
+    if (lock && setAppMode) applyLocked(enabled.load(std::memory_order_acquire) && systemDark());
+}
+
+void setEnabled(bool enabledInSettings) {
+    enabled.store(enabledInSettings, std::memory_order_release);
+    sync();
+}
+
+BOOL WINAPI popup(HMENU menu, UINT flags, int x, int y, int reserved, HWND owner, const RECT* rect) {
+    if (enabled.load(std::memory_order_acquire)) sync();
+    [[clang::musttail]] return originalPopup(menu, flags, x, y, reserved, owner, rect);
+}
+
+BOOL WINAPI popupEx(HMENU menu, UINT flags, int x, int y, HWND owner, LPTPMPARAMS params) {
+    if (enabled.load(std::memory_order_acquire)) sync();
+    [[clang::musttail]] return originalPopupEx(menu, flags, x, y, owner, params);
+}
+
+FARPROC matchOrdinal(HMODULE module, WORD ordinal, DWORD rva) {
+    const FARPROC address = GetProcAddress(module, MAKEINTRESOURCEA(ordinal));
+    return reinterpret_cast<ULONG_PTR>(address) == reinterpret_cast<ULONG_PTR>(module) + rva &&
+           binary_profiles::permitted(module, rva, false) ? address : nullptr;
+}
+
+bool initialize(const wchar_t* image) {
+    if (!supportedHost(image)) return false;
+    const HMODULE module = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!module) return false;
+    if (binary_profiles::identify(module) != uxThemeIdentity) {
+        FreeLibrary(module);
+        return false;
+    }
+    const auto preferred = reinterpret_cast<SetPreferredAppMode>(matchOrdinal(module, 135, 0x48700));
+    const auto flush = reinterpret_cast<FlushMenuThemes>(matchOrdinal(module, 136, 0x4b420));
+    if (!preferred || !flush) {
+        FreeLibrary(module);
+        return false;
+    }
+
+    const bool exHook = Wh_SetFunctionHook(reinterpret_cast<void*>(TrackPopupMenuEx), reinterpret_cast<void*>(popupEx),
+                                          reinterpret_cast<void**>(&originalPopupEx)) != FALSE;
+    const bool basicHook = Wh_SetFunctionHook(reinterpret_cast<void*>(TrackPopupMenu), reinterpret_cast<void*>(popup),
+                                             reinterpret_cast<void**>(&originalPopup)) != FALSE;
+    if (!exHook && !basicHook) {
+        FreeLibrary(module);
+        return false;
+    }
+    uxTheme = module;
+    setAppMode = preferred;
+    flushMenus = flush;
+    return true;
+}
+
+void stop() {
+    enabled.store(false, std::memory_order_release);
+    const std::lock_guard lock(themeMutex);
+    applyLocked(false);
+    setAppMode = nullptr;
+    flushMenus = nullptr;
+    if (const HMODULE module = std::exchange(uxTheme, nullptr)) FreeLibrary(module);
+}
+
+} // namespace dark_menus
+
+namespace control_panel_client {
+// Native Control Panel chrome classes identified by WM_NIGHT (MIT).
+// https://github.com/martona/WM_NIGHT/blob/master/src/DuiPaintHook.cpp
+using Microsoft::WRL::ComPtr;
+using PaintBackground = void (*)(void*, HDC, void*, const RECT&, const RECT&, const RECT&, const RECT&);
+using GetColorFromProperty = HRESULT (*)(void*, const void*, int, ULONG*);
+using ClassInfo = void* (*)(void*);
+using ClassName = const wchar_t* (*)(const void*);
+using ValueType = int (*)(const void*);
+using Property = const void* (*)();
+
+constexpr wchar_t kCategoryHome[] = L"::{26EE0668-A00A-44D7-9371-BEB064C98683}";
+constexpr wchar_t kAllItems[] = L"::{21EC2020-3AEA-1069-A2DD-08002B30309D}";
+constexpr wchar_t kNamespaceCache[] = L"BetterVisual.ControlPanel.Namespace";
+constexpr UINT kGetShellBrowser = WM_USER + 7;
+constexpr COLORREF kBackground = RGB(32, 32, 32);
+constexpr COLORREF kText = RGB(240, 240, 240);
+constexpr COLORREF kSecondaryText = RGB(184, 184, 184);
+constexpr COLORREF kLink = RGB(126, 184, 255);
+constexpr binary_profiles::Identity kDirectUiImage{
+    {0x88,0x9a,0x77,0x30,0xcc,0x3f,0x88,0x97,0x69,0x5b,0x1c,0x8e,0xbd,0x6c,0xfb,0xea},
+    1, 0x1aa000, 0x7ec87a97};
+
+PaintBackground originalBackground = nullptr;
+GetColorFromProperty originalPropertyColor = nullptr;
+decltype(&SetTextColor) originalSetTextColor = nullptr;
+decltype(&BeginPaint) originalBeginPaint = nullptr;
+decltype(&EndPaint) originalEndPaint = nullptr;
+ValueType valueType = nullptr;
+const void* foregroundProperty = nullptr;
+HMODULE library = nullptr;
+std::atomic<bool> ready{false};
+std::atomic<bool> dark{false};
+thread_local bool findingNamespace = false;
+
+struct PaintFrame {
+    HWND window;
+    const PAINTSTRUCT* data;
+    HWND controlPanel;
+};
+thread_local std::array<PaintFrame, 16> paintStack{};
+thread_local std::size_t paintDepth = 0;
+thread_local unsigned paintOverflow = 0;
+
+bool classIs(HWND window, const wchar_t* expected) {
+    wchar_t actual[64]{};
+    return GetClassNameW(window, actual, ARRAYSIZE(actual)) && !_wcsicmp(actual, expected);
+}
+
+bool isLegacyFrame(HWND frame) {
+    return frame && classIs(frame, L"CabinetWClass") &&
+        !FindWindowExW(frame, nullptr, L"Microsoft.UI.Content.DesktopChildSiteBridge", nullptr) &&
+        !FindWindowExW(frame, nullptr, L"ShellTabWindowClass", nullptr);
+}
+
+bool isControlPanelPath(const wchar_t* path) {
+    if (!path) return false;
+    if (!_wcsicmp(path, kCategoryHome) || !_wcsicmp(path, kAllItems)) return true;
+    constexpr auto prefixLength = ARRAYSIZE(kCategoryHome) - 1;
+    if (_wcsnicmp(path, kCategoryHome, prefixLength) || path[prefixLength] != L'\\') return false;
+    const wchar_t* category = path + prefixLength + 1;
+    // Shell canonical names for the built-in views. A nested applet, custom
+    // extension, or deprecated category doesn't match this list.
+    return category[0] && !category[1] && std::wcschr(L"012356789", category[0]);
+}
+
+bool readable(const void* address, std::size_t bytes) {
+    MEMORY_BASIC_INFORMATION region{};
+    if (!address || !VirtualQuery(address, &region, sizeof(region)) || region.State != MEM_COMMIT ||
+        (region.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+        return false;
+    const auto offset = reinterpret_cast<ULONG_PTR>(address) - reinterpret_cast<ULONG_PTR>(region.BaseAddress);
+    return offset <= region.RegionSize && bytes <= region.RegionSize - offset;
+}
+
+std::optional<bool> controlPanelNamespace(HWND frame) {
+    if (findingNamespace) return std::nullopt;
+    struct Lookup {
+        Lookup() { findingNamespace = true; }
+        ~Lookup() { findingNamespace = false; }
+    } lookup;
+    DWORD pid = 0;
+    if (GetWindowThreadProcessId(frame, &pid) != GetCurrentThreadId() || pid != GetCurrentProcessId())
+        return false;
+
+    // Use the already active in-process Shell browser on its own UI thread.
+    // The private message is never sent to another process or an unknown class.
+    auto* browser = reinterpret_cast<IShellBrowser*>(SendMessageW(frame, kGetShellBrowser, 0, 0));
+    if (!readable(browser, sizeof(void*))) return false;
+    auto** const vtable = *reinterpret_cast<void***>(browser);
+    constexpr unsigned queryActiveShellView = 15;
+    if (!readable(vtable, (queryActiveShellView + 1) * sizeof(void*))) return false;
+    HMODULE implementation = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(vtable[queryActiveShellView]), &implementation) ||
+        (implementation != GetModuleHandleW(L"explorerframe.dll") &&
+         implementation != GetModuleHandleW(L"shell32.dll")))
+        return false;
+
+    ComPtr<IShellView> view;
+    ComPtr<IFolderView> folderView;
+    ComPtr<IPersistFolder2> folder;
+    if (FAILED(browser->QueryActiveShellView(&view)) || !view || FAILED(view.As(&folderView)) ||
+        FAILED(folderView->GetFolder(IID_PPV_ARGS(&folder))))
+        return std::nullopt; // The view can still be under construction.
+
+    PIDLIST_ABSOLUTE identity = nullptr;
+    if (FAILED(folder->GetCurFolder(&identity)) || !identity) return std::nullopt;
+    PWSTR path = nullptr;
+    const HRESULT result = SHGetNameFromIDList(identity, SIGDN_DESKTOPABSOLUTEPARSING, &path);
+    CoTaskMemFree(identity);
+    const bool matches = SUCCEEDED(result) && isControlPanelPath(path);
+    CoTaskMemFree(path);
+    return matches;
+}
+
+HWND controlPanelPainter(HWND directUi) {
+    if (!classIs(directUi, L"DirectUIHWND")) return nullptr;
+    const HWND frame = GetAncestor(directUi, GA_ROOT);
+    if (!isLegacyFrame(frame)) return nullptr;
+    const auto cached = reinterpret_cast<ULONG_PTR>(GetPropW(frame, kNamespaceCache));
+    if (cached) return cached == 2 ? directUi : nullptr;
+    const auto matches = controlPanelNamespace(frame);
+    if (matches) SetPropW(frame, kNamespaceCache, reinterpret_cast<HANDLE>(*matches ? 2 : 1));
+    return matches.value_or(false) ? directUi : nullptr;
+}
+
+HWND currentPainter() {
+    if (!dark.load(std::memory_order_relaxed) || paintOverflow || !paintDepth) return nullptr;
+    return paintStack[paintDepth - 1].controlPanel;
+}
+
+bool isScopedPaint(HDC dc) {
+    const HWND panel = currentPainter();
+    if (!dc || !panel) return false;
+    const HWND owner = WindowFromDC(dc);
+    // DirectUI uses an offscreen DC while drawing the panel's child elements.
+    return !owner || owner == panel || IsChild(panel, owner);
+}
+
+HDC WINAPI beginPaint(HWND window, LPPAINTSTRUCT data) {
+    const HWND panel = dark.load(std::memory_order_relaxed) ? controlPanelPainter(window) : nullptr;
+    const HDC dc = originalBeginPaint(window, data);
+    if (dc && (panel || paintDepth)) {
+        if (paintDepth == paintStack.size()) ++paintOverflow;
+        else paintStack[paintDepth++] = {window, data, panel};
+    }
+    return dc;
+}
+
+BOOL WINAPI endPaint(HWND window, const PAINTSTRUCT* data) {
+    if (paintOverflow) --paintOverflow;
+    else if (paintDepth && paintStack[paintDepth - 1].window == window &&
+             paintStack[paintDepth - 1].data == data) --paintDepth;
+    return originalEndPaint(window, data);
+}
+
+COLORREF remapText(COLORREF original) {
+    if ((original >> 24) != 0) return original;
+    const int r = GetRValue(original), g = GetGValue(original), b = GetBValue(original);
+    if (r == g && g == b) {
+        if (r <= 96) return kText;
+        if (r <= 144) return kSecondaryText;
+    }
+    if (b >= 100 && r < 75 && b > g + 25) return kLink;
+    return original;
+}
+
+const wchar_t* elementClass(void* element) {
+    // These DirectUI virtual slots are limited to kDirectUiImage.
+    constexpr unsigned getClassInfoIndex = 35, getNameIndex = 8;
+    auto** elementVtable = *static_cast<void***>(element);
+    if (!elementVtable || !elementVtable[getClassInfoIndex]) return nullptr;
+    const auto getClassInfo = reinterpret_cast<ClassInfo>(elementVtable[getClassInfoIndex]);
+    const auto* info = getClassInfo(element);
+    if (!info) return nullptr;
+    auto* const* infoVtable = *static_cast<void* const* const*>(info);
+    if (!infoVtable || !infoVtable[getNameIndex]) return nullptr;
+    return reinterpret_cast<ClassName>(infoVtable[getNameIndex])(info);
+}
+
+bool replaceChrome(const wchar_t* name, int type) {
+    if (!name) return false;
+    constexpr std::array names{
+        L"HWNDView", L"ControlPanelCategoryModule", L"ControlPanelCategoryModuleInner",
+        L"ControlPanelNavPane", L"ControlPanelNavPaneInner",
+    };
+    for (const auto* candidate : names) {
+        if (!_wcsicmp(name, candidate)) return true;
+    }
+    // Graphic=11 is used for otherwise unnamed background slabs. Interactive
+    // elements and the coloured states of plain Elements still paint natively.
+    return type == 11 && !_wcsicmp(name, L"Element");
+}
+
+void drawBackground(void* element, HDC dc, void* value, const RECT& rect,
+                    const RECT& clip, const RECT& exclude, const RECT& target) {
+    if (element && value && isScopedPaint(dc)) {
+        RECT area{};
+        if (replaceChrome(elementClass(element), valueType(value)) &&
+            IntersectRect(&area, &rect, &clip)) {
+            const auto prior = SetDCBrushColor(dc, kBackground);
+            if (prior != CLR_INVALID) {
+                const bool painted = FillRect(dc, &area, static_cast<HBRUSH>(GetStockObject(DC_BRUSH))) != 0;
+                SetDCBrushColor(dc, prior);
+                if (painted) return;
+            }
+        }
+    }
+    originalBackground(element, dc, value, rect, clip, exclude, target);
+}
+
+COLORREF WINAPI setTextColor(HDC dc, COLORREF color) {
+    return originalSetTextColor(dc, isScopedPaint(dc) ? remapText(color) : color);
+}
+
+HRESULT propertyColor(void* element, const void* property, int index, ULONG* result) {
+    const HRESULT hr = originalPropertyColor(element, property, index, result);
+    if (SUCCEEDED(hr) && result && currentPainter() && property == foregroundProperty) {
+        const ULONG argb = *result;
+        if ((argb >> 24) != 0) {
+            const COLORREF mapped = remapText(RGB((argb >> 16) & 255, (argb >> 8) & 255, argb & 255));
+            *result = (argb & 0xff000000ul) | (GetRValue(mapped) << 16) | (GetGValue(mapped) << 8) | GetBValue(mapped);
+        }
+    }
+    return hr;
+}
+
+bool initialize() {
+    if (library) return ready.load();
+    const auto module = LoadLibraryExW(L"dui70.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!module || binary_profiles::identify(module) != kDirectUiImage) {
+        if (module) FreeLibrary(module);
+        return false;
+    }
+    const auto background = GetProcAddress(module, "?PaintBackground@Element@DirectUI@@QEAAXPEAUHDC__@@PEAVValue@2@AEBUtagRECT@@222@Z");
+    const auto color = GetProcAddress(module, "?GetColorFromProperty@DirectUI@@YAJPEAVElement@1@PEBUPropertyInfo@1@HPEAK@Z");
+    valueType = reinterpret_cast<ValueType>(GetProcAddress(module, "?GetType@Value@DirectUI@@QEBAHXZ"));
+    const auto getForegroundProperty = reinterpret_cast<Property>(GetProcAddress(
+        module, "?ForegroundProp@Element@DirectUI@@SAPEBUPropertyInfo@2@XZ"));
+    if (!background || !color || !valueType || !getForegroundProperty ||
+        !(foregroundProperty = getForegroundProperty())) {
+        FreeLibrary(module);
+        return false;
+    }
+    library = module;
+    ready = Wh_SetFunctionHook(reinterpret_cast<void*>(background), reinterpret_cast<void*>(drawBackground),
+                reinterpret_cast<void**>(&originalBackground)) &&
+            Wh_SetFunctionHook(reinterpret_cast<void*>(color), reinterpret_cast<void*>(propertyColor),
+                reinterpret_cast<void**>(&originalPropertyColor)) &&
+            Wh_SetFunctionHook(reinterpret_cast<void*>(SetTextColor), reinterpret_cast<void*>(setTextColor),
+                reinterpret_cast<void**>(&originalSetTextColor)) &&
+            Wh_SetFunctionHook(reinterpret_cast<void*>(BeginPaint), reinterpret_cast<void*>(beginPaint),
+                reinterpret_cast<void**>(&originalBeginPaint)) &&
+            Wh_SetFunctionHook(reinterpret_cast<void*>(EndPaint), reinterpret_cast<void*>(endPaint),
+                reinterpret_cast<void**>(&originalEndPaint));
+    return ready.load();
+}
+
+void observe(HWND window, UINT message) {
+    if (!ready.load(std::memory_order_relaxed)) return;
+    if (message == WM_NCDESTROY || message == WM_SETTEXT || message == WM_SHOWWINDOW ||
+        message == WM_NCACTIVATE || message == WM_PARENTNOTIFY) {
+        RemovePropW(window, kNamespaceCache);
+    }
+}
+
+BOOL CALLBACK invalidateFrame(HWND window, LPARAM) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    if (pid == GetCurrentProcessId() && isLegacyFrame(window)) {
+        RemovePropW(window, kNamespaceCache);
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
+    return TRUE;
+}
+
+void setEnabled(bool effectiveDark) {
+    const bool useDark = ready.load(std::memory_order_relaxed) && effectiveDark;
+    if (dark.exchange(useDark) != useDark) EnumWindows(invalidateFrame, 0);
+}
+
+void stop() {
+    setEnabled(false);
+    ready = false;
+    if (const auto module = std::exchange(library, nullptr)) FreeLibrary(module);
+}
+} // namespace control_panel_client
+
+namespace legacy_dialogs {
+enum class Host { Other, Explorer, Control, Management, Registry };
+Host currentHost = Host::Other;
+std::atomic<bool> enabled{false};
+std::atomic<bool> dark{false};
+constexpr wchar_t kOriginalTitle[] = L"BetterVisual.RestoreLegacyTitle";
+constexpr COLORREF kBackground = RGB(32, 32, 32);
+constexpr COLORREF kField = RGB(44, 44, 44);
+constexpr COLORREF kText = RGB(240, 240, 240);
+constexpr COLORREF kDisabledText = RGB(156, 156, 156);
+constexpr DWORD kImmersiveTitle = 20;
+decltype(&DefDlgProcW) originalDialog = nullptr;
+decltype(&DefWindowProcW) originalWindow = nullptr;
+using OpenTheme = HANDLE(WINAPI*)(HWND, LPCWSTR);
+using OpenThemeDpi = HANDLE(WINAPI*)(HWND, LPCWSTR, UINT);
+OpenTheme originalOpenTheme = nullptr;
+OpenThemeDpi originalOpenThemeDpi = nullptr;
+HMODULE themeLibrary = nullptr;
+
+bool inDirectory(const wchar_t* image, const wchar_t* fileName, const wchar_t* directory) {
+    const std::size_t length = std::wcslen(directory);
+    return _wcsnicmp(image, directory, length) == 0 && image[length] == L'\\' &&
+           _wcsicmp(image + length + 1, fileName) == 0;
+}
+
+bool allowControlApplet(const wchar_t* commandLine, const wchar_t* system) {
+    int count = 0;
+    LPWSTR* args = CommandLineToArgvW(commandLine, &count);
+    if (!args) return false;
+    bool accepted = false;
+    if (count >= 3 && (_wcsicmp(args[1], L"shell32.dll,Control_RunDLL") == 0 ||
+                      inDirectory(args[1], L"shell32.dll,Control_RunDLL", system))) {
+        std::wstring applet(args[2]);
+        if (const auto comma = applet.find(L','); comma != std::wstring::npos) applet.erase(comma);
+        constexpr const wchar_t* names[]{
+            L"appwiz.cpl", L"desk.cpl", L"hdwwiz.cpl", L"inetcpl.cpl", L"intl.cpl", L"main.cpl",
+            L"mmsys.cpl", L"ncpa.cpl", L"powercfg.cpl", L"sysdm.cpl", L"timedate.cpl"};
+        for (const auto* name : names) {
+            if (_wcsicmp(applet.c_str(), name) == 0 || inDirectory(applet.c_str(), name, system)) {
+                accepted = true;
+                break;
+            }
+        }
+    }
+    LocalFree(args);
+    return accepted;
+}
+
+Host findHost(const wchar_t* image, const wchar_t* commandLine) {
+    wchar_t windows[MAX_PATH]{};
+    wchar_t system[MAX_PATH]{};
+    const UINT windowsLength = GetWindowsDirectoryW(windows, ARRAYSIZE(windows));
+    const UINT systemLength = GetSystemDirectoryW(system, ARRAYSIZE(system));
+    if (!windowsLength || windowsLength >= ARRAYSIZE(windows) || !systemLength || systemLength >= ARRAYSIZE(system))
+        return Host::Other;
+    if (inDirectory(image, L"explorer.exe", windows)) return Host::Explorer;
+    if (inDirectory(image, L"regedit.exe", windows)) return Host::Registry;
+    if (inDirectory(image, L"mmc.exe", system)) return Host::Management;
+    if (inDirectory(image, L"rundll32.exe", system))
+        return allowControlApplet(commandLine, system) ? Host::Control : Host::Other;
+    constexpr const wchar_t* controllers[]{
+        L"control.exe", L"OptionalFeatures.exe", L"SystemPropertiesAdvanced.exe", L"SystemPropertiesComputerName.exe",
+        L"SystemPropertiesHardware.exe", L"SystemPropertiesPerformance.exe", L"SystemPropertiesProtection.exe",
+        L"SystemPropertiesRemote.exe"};
+    for (const auto* name : controllers) if (inDirectory(image, name, system)) return Host::Control;
+    return Host::Other;
+}
+
+bool supportedBuild() {
+    using Version = LONG(WINAPI*)(OSVERSIONINFOW*);
+    const auto version = reinterpret_cast<Version>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+    OSVERSIONINFOW info{};
+    info.dwOSVersionInfoSize = sizeof(info);
+    if (!version || version(&info) != 0 || info.dwBuildNumber < 26100) return false;
+    if (info.dwBuildNumber != 26100 && info.dwBuildNumber != 26200) return info.dwBuildNumber >= 26300;
+    DWORD revision = 0;
+    DWORD size = sizeof(revision);
+    return RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", L"UBR",
+                        RRF_RT_REG_DWORD, nullptr, &revision, &size) == ERROR_SUCCESS && revision >= 6899;
+}
+
+bool sameClass(HWND window, LPCWSTR expected) {
+    wchar_t name[64]{};
+    return window && GetClassNameW(window, name, ARRAYSIZE(name)) > 0 && _wcsicmp(name, expected) == 0;
+}
+
+bool supportedDialog(HWND window) {
+    if (!sameClass(window, L"#32770")) return false;
+    const HWND root = GetAncestor(window, GA_ROOT);
+    if (root != window && !sameClass(root, L"#32770")) return false;
+    // Property sheets contain a standard tab control. Preserve native
+    // DirectUI-based tasks, including Windows' themed file operations.
+    if (FindWindowExW(root, nullptr, L"SysTabControl32", nullptr)) return true;
+    return !FindWindowExW(root, nullptr, L"DirectUIHWND", nullptr) &&
+           !FindWindowExW(root, nullptr, L"DUIViewWndClassName", nullptr);
+}
+
+bool supportedRoot(HWND window) {
+    return supportedDialog(window) ||
+        (currentHost == Host::Registry && sameClass(window, L"RegEdit_RegEdit")) ||
+        (currentHost == Host::Management && sameClass(window, L"MMCMainFrame"));
+}
+
+bool supportedControl(HWND window) {
+    const HWND parent = GetParent(window);
+    return (parent && supportedDialog(parent)) || supportedRoot(GetAncestor(window, GA_ROOT));
+}
+
+void setTitle(HWND window, bool useDark) {
+    if (GetAncestor(window, GA_ROOT) != window) return;
+    const BOOL on = TRUE;
+    const BOOL off = FALSE;
+    if (useDark) {
+        if (GetPropW(window, kOriginalTitle)) return;
+        BOOL wasDark = FALSE;
+        if (FAILED(DwmGetWindowAttribute(window, kImmersiveTitle, &wasDark, sizeof(wasDark))) || wasDark) return;
+        if (SetPropW(window, kOriginalTitle, reinterpret_cast<HANDLE>(1))) {
+            if (FAILED(DwmSetWindowAttribute(window, kImmersiveTitle, &on, sizeof(on))))
+                RemovePropW(window, kOriginalTitle);
+        }
+    } else if (RemovePropW(window, kOriginalTitle)) {
+        DwmSetWindowAttribute(window, kImmersiveTitle, &off, sizeof(off));
+    }
+}
+
+BOOL CALLBACK notifyControl(HWND window, LPARAM) {
+    PostMessageW(window, WM_THEMECHANGED, 0, 0);
+    return TRUE;
+}
+
+BOOL CALLBACK refreshWindow(HWND window, LPARAM flags) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    if (pid != GetCurrentProcessId() || !supportedRoot(window)) return TRUE;
+    setTitle(window, flags != 0);
+    notifyControl(window, 0);
+    EnumChildWindows(window, notifyControl, 0);
+    RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+    return TRUE;
+}
+
+void refreshTheme() {
+    const bool useDark = enabled.load(std::memory_order_relaxed) && dark_menus::systemDark();
+    const bool previous = dark.exchange(useDark, std::memory_order_relaxed);
+    if (previous == useDark) return;
+    control_panel_client::setEnabled(useDark);
+    if (themeLibrary) EnumWindows(refreshWindow, static_cast<LPARAM>(useDark));
+}
+
+void setEnabled(bool setting) {
+    enabled.store(setting, std::memory_order_relaxed);
+    refreshTheme();
+}
+
+LRESULT colors(UINT message, HDC dc, HWND control) {
+    if (!dc) return 0;
+    if (message == WM_CTLCOLORSTATIC && sameClass(control, L"Static")) {
+        const auto style = GetWindowLongPtrW(control, GWL_STYLE) & SS_TYPEMASK;
+        if (style == SS_ICON || style == SS_BITMAP || style == SS_ENHMETAFILE ||
+            style == SS_OWNERDRAW || style >= SS_ETCHEDHORZ) return 0;
+    }
+    const bool field = message == WM_CTLCOLOREDIT || message == WM_CTLCOLORLISTBOX || sameClass(control, L"Edit");
+    const COLORREF background = field ? kField : kBackground;
+    SetTextColor(dc, control && !IsWindowEnabled(control) ? kDisabledText : kText);
+    SetBkColor(dc, background);
+    SetDCBrushColor(dc, background);
+    return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
+}
+
+LRESULT WINAPI dialog(HWND window, UINT message, WPARAM w, LPARAM l) {
+    if (dark.load(std::memory_order_relaxed)) {
+        if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC || message == WM_CTLCOLOREDIT ||
+            message == WM_CTLCOLORBTN || message == WM_CTLCOLORLISTBOX) {
+            if (supportedDialog(window))
+                if (const auto result = colors(message, reinterpret_cast<HDC>(w), reinterpret_cast<HWND>(l))) return result;
+        } else if ((message == WM_INITDIALOG || (message == WM_SHOWWINDOW && w)) && supportedDialog(window)) {
+            setTitle(window, true);
+        }
+    }
+    [[clang::musttail]] return originalDialog(window, message, w, l);
+}
+
+LRESULT WINAPI window(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
+    if ((message == WM_SETTINGCHANGE || message == WM_SYSCOLORCHANGE || message == WM_THEMECHANGED) &&
+        GetAncestor(hwnd, GA_ROOT) == hwnd) refreshTheme();
+    if (currentHost == Host::Explorer) control_panel_client::observe(hwnd, message);
+    if (dark.load(std::memory_order_relaxed) && (message == WM_SHOWWINDOW || message == WM_NCACTIVATE) &&
+        supportedRoot(hwnd)) setTitle(hwnd, true);
+    [[clang::musttail]] return originalWindow(hwnd, message, w, l);
+}
+
+LPCWSTR darkClass(LPCWSTR requested) {
+    if (!requested) return nullptr;
+#define BETTER_VISUAL_THEME(name) if (_wcsicmp(requested, L##name) == 0) return L"DarkMode_DarkTheme::" L##name
+    BETTER_VISUAL_THEME("Button");
+    BETTER_VISUAL_THEME("ComboBox");
+    BETTER_VISUAL_THEME("Edit");
+    BETTER_VISUAL_THEME("Header");
+    BETTER_VISUAL_THEME("ListView");
+    BETTER_VISUAL_THEME("ListBox");
+    BETTER_VISUAL_THEME("Progress");
+    BETTER_VISUAL_THEME("ScrollBar");
+    BETTER_VISUAL_THEME("Status");
+    BETTER_VISUAL_THEME("Tab");
+    BETTER_VISUAL_THEME("Toolbar");
+    BETTER_VISUAL_THEME("Trackbar");
+    BETTER_VISUAL_THEME("TreeView");
+    BETTER_VISUAL_THEME("UpDown");
+#undef BETTER_VISUAL_THEME
+    return nullptr;
+}
+
+HANDLE WINAPI open(HWND hwnd, LPCWSTR classes) {
+    if (dark.load(std::memory_order_relaxed)) {
+        const auto name = darkClass(classes);
+        if (name && supportedControl(hwnd))
+            if (const auto theme = originalOpenTheme(hwnd, name)) return theme;
+    }
+    [[clang::musttail]] return originalOpenTheme(hwnd, classes);
+}
+
+HANDLE WINAPI openDpi(HWND hwnd, LPCWSTR classes, UINT dpi) {
+    if (dark.load(std::memory_order_relaxed)) {
+        const auto name = darkClass(classes);
+        if (name && supportedControl(hwnd))
+            if (const auto theme = originalOpenThemeDpi(hwnd, name, dpi)) return theme;
+    }
+    [[clang::musttail]] return originalOpenThemeDpi(hwnd, classes, dpi);
+}
+
+bool initialize(Host host) {
+    if (host == Host::Other || !supportedBuild()) return false;
+    const HMODULE library = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!library) return false;
+    const auto theme = GetProcAddress(library, "OpenThemeData");
+    const auto perDpi = GetProcAddress(library, "OpenThemeDataForDpi");
+    if (!theme) { FreeLibrary(library); return false; }
+    currentHost = host;
+    themeLibrary = library;
+    const bool dialogInstalled = Wh_SetFunctionHook(reinterpret_cast<void*>(DefDlgProcW), reinterpret_cast<void*>(dialog),
+                                                   reinterpret_cast<void**>(&originalDialog));
+    const bool windowInstalled = Wh_SetFunctionHook(reinterpret_cast<void*>(DefWindowProcW), reinterpret_cast<void*>(window),
+                                                   reinterpret_cast<void**>(&originalWindow));
+    const bool themesInstalled = Wh_SetFunctionHook(reinterpret_cast<void*>(theme), reinterpret_cast<void*>(open),
+                                                   reinterpret_cast<void**>(&originalOpenTheme));
+    const bool dpiInstalled = perDpi && Wh_SetFunctionHook(reinterpret_cast<void*>(perDpi), reinterpret_cast<void*>(openDpi),
+                                                         reinterpret_cast<void**>(&originalOpenThemeDpi));
+    if (dialogInstalled || windowInstalled || themesInstalled || dpiInstalled) return true;
+    FreeLibrary(std::exchange(themeLibrary, nullptr));
+    return false;
+}
+
+void stop() {
+    setEnabled(false);
+    if (const HMODULE library = std::exchange(themeLibrary, nullptr)) FreeLibrary(library);
+}
+} // namespace legacy_dialogs
+
+bool runZoomController = false;
+
+void updateLegacyTheme() {
+    const bool setting = Wh_GetIntSetting(L"darkLegacyWindows") != 0;
+    dark_menus::setEnabled(setting);
+    legacy_dialogs::setEnabled(setting);
+}
+void stopLegacyTheme() {
+    legacy_dialogs::stop();
+    control_panel_client::stop();
+    dark_menus::stop();
+}
+
 BOOL Wh_ModInit() {
     DWORD session = 0;
     if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || !session) return FALSE;
@@ -5562,30 +6287,45 @@ BOOL Wh_ModInit() {
         if (magnifier::initialize(supportedBuild)) return TRUE;
         return magnifier::symbolUnsupported && !magnifier::hooksAttempted;
     }
-    if (_wcsicmp(leaf, L"explorer.exe") != 0) return FALSE;
-    // Folder Explorer processes must not reserve the controller while
-    // the desktop Explorer is still coming up.
+    const auto host = legacy_dialogs::findHost(path, GetCommandLineW());
+    if (host == legacy_dialogs::Host::Other) return FALSE;
+    const bool menusAvailable = dark_menus::initialize(path);
+    const bool dialogsAvailable = legacy_dialogs::initialize(host);
+    const bool controlPanelAvailable = host == legacy_dialogs::Host::Explorer && control_panel_client::initialize();
+    const bool themeAvailable = menusAvailable || dialogsAvailable || controlPanelAvailable;
+    Wh_Log(L"Legacy theme profiles: popup menus=%d, dialogs=%d, Control Panel=%d.",
+           menusAvailable, dialogsAvailable, controlPanelAvailable);
+    if (host != legacy_dialogs::Host::Explorer) return themeAvailable;
+
+    // Secondary Explorer processes can theme their own windows while the
+    // desktop shell alone owns the zoom controller and gesture hooks.
     DWORD shellOwner = 0;
     if (const HWND shellWindow = GetShellWindow()) GetWindowThreadProcessId(shellWindow, &shellOwner);
-    if (shellOwner && shellOwner != GetCurrentProcessId()) return FALSE;
+    if (shellOwner && shellOwner != GetCurrentProcessId()) return themeAvailable;
     if (!shellOwner) {
         int count = 0;
         const auto args = CommandLineToArgvW(GetCommandLineW(), &count);
-        if (!args) return FALSE;
+        if (!args) return themeAvailable;
         const bool startupShell = count == 1 || (count == 2 && _wcsicmp(args[1], L"/nouaccheck") == 0);
         LocalFree(args);
-        if (!startupShell) return FALSE;
+        if (!startupShell) return themeAvailable;
     }
-    if (native_gate::initialize()) return TRUE;
-    // Unsupported symbols permit the controller and native keyboard fallback.
-    if (native_gate::symbolUnsupported && !native_gate::hooksAttempted) return TRUE;
+    if (native_gate::initialize() || (native_gate::symbolUnsupported && !native_gate::hooksAttempted)) {
+        runZoomController = true;
+        return TRUE;
+    }
     native_gate::stop();
+    if (!native_gate::hooksAttempted) return themeAvailable;
+    stopLegacyTheme();
     return FALSE;
 }
 void Wh_ModAfterInit() {
     if (magnifier::role) { magnifier::afterInit(); return; }
-    native_gate::ready();
-    controller::start();
+    updateLegacyTheme();
+    if (runZoomController) {
+        native_gate::ready();
+        controller::start();
+    }
 }
 BOOL Wh_ModSettingsChanged(BOOL* reload) {
     *reload = FALSE;
@@ -5596,12 +6336,14 @@ BOOL Wh_ModSettingsChanged(BOOL* reload) {
         magnifier::keepPointerStable.store(Wh_GetIntSetting(L"keepPointerStable") != 0);
         return TRUE;
     }
-    controller::reloadSettings();
+    updateLegacyTheme();
+    if (runZoomController) controller::reloadSettings();
     return TRUE;
 }
 void Wh_ModUninit() {
     if (magnifier::role) { magnifier::stop(); return; }
-    if (controller::stop()) native_gate::stop();
+    stopLegacyTheme();
+    if (runZoomController && controller::stop()) native_gate::stop();
 }
 
 #endif  // PINCH_ZOOM_GATE_TEST

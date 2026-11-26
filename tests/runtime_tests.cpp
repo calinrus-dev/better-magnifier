@@ -216,13 +216,16 @@ int wmain(int argc, wchar_t** argv) {
         runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.12), 1116);
         require(record.requestedSequence == wheelSequence + 1 && record.requestInputRevision != 20 &&
                 record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch) &&
-                record.requestedLevel == 21000 && !record.wheelPacket && !record.wheelActive,
-                "classification clears queued wheel and its old epoch before pinching from the visible factor");
-        bridge::enqueueWheel(&record, 120, record.inputRevision, 1117);
-        runtime::HostTestAccess::tick(host, 1118);
+                record.requestedLevel == 23500 && !record.wheelPacket && !record.wheelActive,
+                "an outward pinch cancels queued wheel input without reverting from acknowledged 235% to a lagging 210% sample");
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.14), 1120);
+        const LONG firstOutward = record.requestedLevel;
+        require(firstOutward > 23500, "the next outward pinch frame increases from its non-reversing handoff");
+        bridge::enqueueWheel(&record, 120, record.inputRevision, 1121);
+        runtime::HostTestAccess::tick(host, 1122);
         const LONG wheelDuringPinch = record.requestedLevel;
-        require(wheelDuringPinch == 21000 + 210 * pinch::Config{}.wheelStep &&
-                record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch) && !record.wheelActive,
+        require(std::abs(wheelDuringPinch - firstOutward * (1 + pinch::Config{}.wheelStep / 100.0)) <= 1 &&
+                record.requestSource == static_cast<LONG>(bridge::InputSource::PinchWheel) && !record.wheelActive,
                 "wheel travel changes the recognizer's shared factor instead of starting a competing animation");
         record.nativeLevel = 28000;
         record.currentSource = static_cast<LONG>(bridge::InputSource::Keyboard);
@@ -236,7 +239,7 @@ int wmain(int argc, wchar_t** argv) {
         runtime::HostTestAccess::frame(host, pinchDevice, {}, 1148);
         const LONG lastPinch = record.requestedLevel;
         require(!record.down && record.zoomModeActive && lastPinch > beforeLift &&
-                record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch),
+                record.requestSource == static_cast<LONG>(bridge::InputSource::PinchWheel),
                 "wheel travel before lift is included in the last pinch target; the mode stays above 100%");
         bridge::enqueueWheel(&record, 120, record.inputRevision, 1150);
         runtime::HostTestAccess::tick(host, 1164);
@@ -244,6 +247,56 @@ int wmain(int argc, wchar_t** argv) {
         require(record.requestSource == static_cast<LONG>(bridge::InputSource::Wheel) &&
                 std::abs(runtime::HostTestAccess::goal(host) - expected) < 0.0001,
                 "a wheel event after lift continues from the final unacknowledged pinch target");
+    }
+    {
+        HostFixture fixture(21, {2, 0, 0});
+        auto& record = fixture.record;
+        auto& host = fixture.host;
+        runtime::HostTestAccess::nativeBackend(host, record);
+        runtime::HostTestAccess::tick(host, 1080);
+        bridge::enqueueWheel(&record, -12000, 21, 1081);
+        runtime::HostTestAccess::tick(host, 1088);
+        runtime::HostTestAccess::tick(host, 1120);
+        require(record.requestedLevel == 10000 && record.zoomModeActive,
+                "the main wheel requests exactly normal zoom without losing armed mode");
+        record.nativeLevel = 10000;
+        record.currentSource = static_cast<LONG>(bridge::InputSource::Pinch);
+        runtime::HostTestAccess::tick(host, 1136);
+        require(record.zoomModeActive, "a native floor still waiting for its wheel acknowledgement cannot disarm from the old source");
+        record.appliedSequence = record.requestedSequence;
+        record.currentSource = static_cast<LONG>(bridge::InputSource::Wheel);
+        runtime::HostTestAccess::tick(host, 1152);
+        require(record.zoomModeActive, "an acknowledged main-wheel floor latches the zoom mode at 100 percent");
+        bridge::enqueueWheel(&record, 30, record.inputRevision, 1154);
+        runtime::HostTestAccess::tick(host, 1160);
+        require(record.zoomModeActive && record.requestedLevel > 10000,
+                "the first reverse wheel frame zooms again without a rearm chord");
+        runtime::HostTestAccess::resetMouse(host);
+        require(!record.zoomModeActive && record.pendingCommand == 3,
+                "central reset clears the wheel's floor latch and prevents stale acknowledgement from restoring it");
+    }
+    {
+        HostFixture fixture(22, {1.2, 0, 0});
+        auto& record = fixture.record;
+        auto& host = fixture.host;
+        record.gateReady = 1;
+        record.shellPid = static_cast<LONG>(GetCurrentProcessId());
+        runtime::HostTestAccess::nativeBackend(host, record);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1), 1180);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.1), 1196);
+        bridge::enqueueWheel(&record, -12000, record.inputRevision, 1200);
+        runtime::HostTestAccess::tick(host, 1204);
+        const LONG floorSequence = record.requestedSequence;
+        require(record.requestedLevel == 10000 && record.requestSource == static_cast<LONG>(bridge::InputSource::PinchWheel),
+                "wheel input merged into a live pinch still identifies itself as the actor that reached the floor");
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.1), 1212);
+        require(record.requestedSequence == floorSequence,
+                "a stationary pinch cannot relabel the wheel's unacknowledged floor");
+        record.nativeLevel = 10000;
+        record.currentSource = record.requestSource;
+        record.appliedSequence = floorSequence;
+        runtime::HostTestAccess::frame(host, pinchDevice, {}, 1228);
+        require(!record.down && record.zoomModeActive, "the mixed wheel floor remains armed after releasing the touchpad");
     }
     {
         HostFixture fixture(45, {1, 0, 0});
@@ -259,8 +312,19 @@ int wmain(int argc, wchar_t** argv) {
         runtime::HostTestAccess::frame(host, pinchDevice, {}, 1212);
         require(record.zoomModeActive, "lifting fingers keeps the mode while the actual zoom is magnified");
         record.nativeLevel = 10000;
+        record.appliedSequence = record.requestedSequence;
+        record.currentSource = static_cast<LONG>(bridge::InputSource::Pinch);
         runtime::HostTestAccess::tick(host, 1228);
-        require(!record.zoomModeActive, "returning naturally to normal disarms without a chord");
+        require(!record.zoomModeActive, "returning to normal by pinching disarms without a chord");
+    }
+    {
+        HostFixture fixture(46);
+        auto& record = fixture.record;
+        runtime::HostTestAccess::tick(fixture.host, 1244);
+        record.nativeLevel = 10000;
+        record.currentSource = static_cast<LONG>(bridge::InputSource::Keyboard);
+        runtime::HostTestAccess::tick(fixture.host, 1260);
+        require(!record.zoomModeActive, "the native keyboard still disarms when it returns to normal");
     }
     {
         HostFixture fixture(12);
@@ -486,14 +550,6 @@ int wmain(int argc, wchar_t** argv) {
         record.magnifierReady = 0; record.resolverReasonNative = ERROR_NOT_SUPPORTED;
         require(!zoom.target(4, true) && !zoom.resetToNormal() && zoom.tick(16, 0) && simulated.zoom == 3,
                 "backend loss or pause cannot write a public replacement transform over native Windows zoom");
-    }
-    {
-        HostFixture fixture(123);
-        auto& record = fixture.record; auto& host = fixture.host;
-        bridge::enqueueWheel(&record, 1, 123, 1001);
-        runtime::HostTestAccess::tick(host, 1000);
-        require(runtime::HostTestAccess::goal(host) > 2 && !record.wheelPacket,
-                "a fresh producer timestamp one millisecond after the sampled frame is not discarded");
     }
     {
         HostFixture fixture(160);
@@ -778,6 +834,8 @@ int wmain(int argc, wchar_t** argv) {
         HostFixture fixture(211, {1, 0, 0}); auto& record = fixture.record;
         runtime::HostTestAccess::nativeBackend(fixture.host, record);
         bridge::enqueueWheel(&record, 1, 211, 1001); runtime::HostTestAccess::tick(fixture.host, 1000);
+        require(runtime::HostTestAccess::goal(fixture.host) > 1 && !record.wheelPacket,
+                "a fresh producer timestamp one millisecond after the sampled frame is not discarded");
         const auto expected = std::llround(std::pow(1 + pinch::Config{}.wheelStep / 100.0, 1.0 / 120) * 10000);
         require(record.requestedSequence == 1 && record.requestedLevel >= 10000 && record.requestedLevel <= expected,
                 "a concurrent fresh fractional delta does not receive an artificial first jump");

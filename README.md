@@ -1,10 +1,10 @@
-# Better Magnifier
+# Better Visual
 
-*An experimental accessibility mod for Windhawk: smooth pinch, keyboard and mouse-wheel zoom, inspired by KWin and powered by Windows Magnifier.*
+*Mod de accesibilidad para Windhawk con zoom fluido al estilo KWin y tema oscuro para interfaces clásicas de Windows 11.*
 
 Un proyecto de **accesibilidad para Windows**, inspirado en el efecto de zoom de **KWin / KDE Plasma**. Permite ampliar todo el escritorio con un **pellizco de tres dedos**, usando el motor de la Lupa de Windows. Abre los dedos para acercar y ciérralos para alejar. Puedes alternarlo con **Win + «+» / «−»**, también en el teclado numérico.
 
-**0.8.3 experimental.** El pellizco de tres dedos enciende el modo de zoom mientras la vista esté ampliada, incluso después de soltar los dedos. Al volver al 100 %, se apaga. Pulsa **clic izquierdo y derecho a la vez** para alternarlo conservando el nivel. Con el modo activo, **rueda principal** amplía o reduce, **clic de rueda** vuelve al 100 % y **rueda lateral** desplaza el contenido verticalmente.
+**Better Visual 1.0.0.** El pellizco de tres dedos enciende el modo de zoom y lo apaga al volver al 100 %. La **rueda principal** mantiene el modo encendido al llegar al 100 %, lista para ampliar de nuevo. Pulsa **clic izquierdo y derecho a la vez** para alternar el modo conservando el nivel. Con el modo activo, **clic de rueda** restablece el 100 % y **rueda lateral** desplaza el contenido verticalmente.
 
 Las funciones avanzadas están validadas en Windows 11 x64, compilación **26200**, con Windhawk **1.7.3**. Una versión o interfaz no verificada conserva los controles estándar de la Lupa; no implica soporte del zoom continuo. El mod conserva la configuración de gestos del touchpad.
 
@@ -12,7 +12,7 @@ Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantall
 
 ## Comportamiento
 
-- **Rueda principal** en el modo zoom, o **Win+rueda** como atajo, aplica un factor de 1,2 por cada 120 unidades por defecto. Los deltas fraccionarios cuentan proporcionalmente. La respuesta empieza con el primer movimiento. Se agrupan los eventos por cuadro y se suavizan en una transición de 32 ms. El pellizco toma el nivel visible y cancela el movimiento pendiente de la rueda.
+- **Rueda principal** en el modo zoom, o **Win+rueda** como atajo, aplica un factor de 1,2 por cada 120 unidades por defecto. Los deltas fraccionarios cuentan proporcionalmente. La respuesta empieza con el primer movimiento. Se agrupan los eventos por cuadro y se suavizan en una transición de 32 ms. El pellizco cancela el movimiento pendiente de la rueda. Un gesto que amplía conserva al menos el nivel ya confirmado por la Lupa.
 
 - **Clic izquierdo + derecho** alterna el control de zoom del ratón y conserva el nivel actual. El acorde se detecta sin modificadores y con hasta 45 ms entre pulsaciones. Las ventanas elevadas reciben los clics directamente. Con el modo activo, **clic de rueda** o **Win+clic central** vuelven al 100 % y apagan el modo. La **rueda lateral** desplaza verticalmente si el modo está activo, como en el perfil de CachyOS del Keychron M6.
 - **Ctrl+Alt+rueda** recorre las ventanas, con confirmación de la ventana activada y descarte del recorrido pendiente al invertir. La cola se limita a seis pasos y 200 ms.
@@ -31,6 +31,12 @@ Pensada para leer texto pequeño, inspeccionar detalles y moverse por la pantall
 - No hay un límite propio de 400 %. Con `Maximum zoom = 0` se usa el rango nativo de esta Lupa, **100–1600 %**. Su motor tiene ese límite; el máximo teórico de la API independiente no amplía el rango del motor nativo.
 
 En OBS, selecciona **Captura de ventana** para compartir la aplicación a su escala normal. El marco usa DirectComposition con una textura estática de WARP para mantener sus cinco píxeles físicos en los cuatro bordes mientras cambia la ampliación o la posición de la vista. El marco solicita exclusión de captura. Para compartir un monitor completo en OBS, selecciona el método **Moderno (WGC)**. En este equipo, DXGI sí capturó la ampliación.
+
+## Tema oscuro de Windows
+
+**Dark mode for classic Windows interfaces** sigue el modo de aplicaciones de Windows y respeta el tema de contraste. Cubre las vistas clásicas seleccionadas del Panel de control en la compilación compatible, diálogos y hojas de propiedades Win32 de Explorer y de varios applets de Windows, y los menús emergentes estándar de Explorer, Regedit y MMC cuando la biblioteca del sistema coincide con el perfil verificado. Los paneles dibujados por cada aplicación pueden conservar su estilo. Las aplicaciones de terceros conservan su propio tema.
+
+El sistema ya aporta su tema a superficies como los diálogos recientes de copia, movimiento y eliminación. Consulta la matriz de [validación](docs/VALIDATION.md) para ver qué superficies clásicas se comprobaron y cuáles conservan su estilo de Windows.
 
 ## Ajustes
 
@@ -61,18 +67,18 @@ El seguimiento del ratón, el teclado, el texto y Narrador se configura en la Lu
 
 ## Instalación
 
-Descargas de la [0.8.3 en GitHub](https://github.com/calinrus-dev/better-magnifier/releases/tag/v0.8.3). Incluye el archivo de Windhawk, el código fuente, un paquete x64 compilado y `SHA256SUMS.txt` para comprobar las descargas.
+Descargas de [Better Visual 1.0.0 en GitHub](https://github.com/calinrus-dev/better-magnifier/releases/tag/v1.0.0). Incluye el archivo de Windhawk, el código fuente, un paquete x64 compilado y `SHA256SUMS.txt` para comprobar las descargas.
 
 1. Descarga [`mods/kde-pinch-zoom.wh.cpp`](mods/kde-pinch-zoom.wh.cpp).
 2. En Windhawk, usa **Crear un nuevo Mod**, sustituye el ejemplo por el archivo completo y compila.
-3. Actívalo. Se carga en `explorer.exe` y `magnify.exe`. La primera resolución de símbolos puede tardar.
+3. Actívalo. Explorer y la Lupa gestionan el zoom. El tema se carga en los procesos de Windows indicados en los metadatos del mod. La primera resolución de símbolos puede tardar.
 4. Si usabas **Magnifier Headless Mode**, desactívalo para evitar dos mods ocultando las mismas ventanas. La ocultación ya está integrada aquí.
 
-El mod es local; no necesita publicarse en el catálogo de Windhawk. Al actualizar, sustituye el archivo completo para incluir los dos procesos de destino.
+El mod es local; no necesita publicarse en el catálogo de Windhawk. Al actualizar, sustituye el archivo completo para incluir los destinos de la versión nueva.
 
-Después de compilar también puedes ejecutar `scripts/install-local.ps1` en PowerShell **como administrador**. Está limitado a la instalación estándar de Windhawk y a `local@kde-pinch-zoom`. Conserva los ajustes existentes y añade los nuevos valores predeterminados. Por la integración solicitada, desactiva únicamente el antiguo `magnifier-headless`, conservándolo instalado. Instala una DLL con nombre basado en su hash. Si hay una versión anterior cargada, espera a que Windhawk la descargue de Explorer y la Lupa. Si sigue cargada, restaura la configuración previa. Windows conserva el control de los procesos y la vista durante la actualización. No modifica las claves de gestos del touchpad ni otros mods.
+Después de compilar también puedes ejecutar `scripts/install-local.ps1` en PowerShell **como administrador**. Está limitado a la instalación estándar de Windhawk y a `local@kde-pinch-zoom`. Conserva los ajustes existentes y añade los nuevos valores predeterminados. Por la integración solicitada, desactiva únicamente el antiguo `magnifier-headless`, conservándolo instalado. Instala una DLL con nombre basado en su hash. Si hay una versión anterior cargada, espera a que Windhawk la descargue de los procesos de destino. Si sigue cargada, restaura la configuración previa. Windows conserva el control de los procesos y la vista durante la actualización. No modifica las claves de gestos del touchpad ni otros mods.
 
-Con el paquete `better-magnifier-0.8.3-windows-x64.zip`, extráelo completo y ejecuta ese script desde su carpeta en una consola de administrador; los binarios ya están compilados. Conserva las carpetas `build`, `mods` y `scripts` juntas. Para actualizar desde una versión anterior, usa el mismo mod local: el identificador sigue siendo `local@kde-pinch-zoom`, aunque el nombre visible sea Better Magnifier. Las revisiones intermedias 0.7.1–0.7.4 no se publicaron como releases.
+Con el paquete `better-visual-1.0.0-windows-x64.zip`, extráelo completo y ejecuta ese script desde su carpeta en una consola de administrador; los binarios ya están compilados. Conserva las carpetas `build`, `mods` y `scripts` juntas. Para actualizar desde una versión anterior, usa el mismo mod local: el identificador sigue siendo `local@kde-pinch-zoom`, con el nombre visible Better Visual.
 
 `-Disable` desactiva este mod. `-WheelStep 20` aplica explícitamente el paso de 20 % en una instalación existente. `-Acceleration 35 -MaximumZoom 0` permite cambiar esos dos ajustes. El resultado queda en `build/install-result.json`. El instalador comprueba `build/build-info.json` para verificar el código y la DLL.
 

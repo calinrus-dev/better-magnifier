@@ -38,13 +38,15 @@ function Restore-Values($RegistryKey, $Saved, [string]$Skip = $null) {
         if (!$Skip -or $name -ne $Skip) { $RegistryKey.SetValue($name, $Saved[$name].Value, $Saved[$name].Kind) }
     }
 }
-function Get-LoadedModLibraries([int]$Session) {
-    $processes = Get-Process -Name explorer,Magnify -ErrorAction SilentlyContinue
+function Get-LoadedModLibraries([int]$Session, [string[]]$ProcessNames) {
+    $processes = Get-Process -Name $ProcessNames -ErrorAction SilentlyContinue
     foreach ($process in $processes) {
         try {
             if ($process.SessionId -ne $Session) { continue }
             foreach ($module in $process.Modules) {
-                if ($module.ModuleName -like ($modId + '_*.dll')) { $module.ModuleName }
+                if ($module.ModuleName -like ($modId + '_*.dll')) {
+                    [pscustomobject]@{ Library = $module.ModuleName; Host = "$($process.ProcessName) [$($process.Id)]" }
+                }
             }
         } catch {
             if (-not $process.HasExited) { throw }
@@ -53,14 +55,15 @@ function Get-LoadedModLibraries([int]$Session) {
         }
     }
 }
-function Wait-PreviousModUnloaded([int]$Session, [string]$NewLibrary) {
+function Wait-PreviousModUnloaded([int]$Session, [string[]]$ProcessNames, [string]$NewLibrary) {
     $timeout = [Diagnostics.Stopwatch]::StartNew()
     do {
-        $remaining = @(Get-LoadedModLibraries $Session | Where-Object { $_ -ne $NewLibrary })
+        $remaining = @(Get-LoadedModLibraries $Session $ProcessNames | Where-Object Library -ne $NewLibrary)
         if ($remaining.Count -eq 0) { return }
         Start-Sleep -Milliseconds 180
     } while ($timeout.Elapsed.TotalSeconds -lt 8)
-    throw 'Windhawk still has the previous DLL loaded. The installation was interrupted before switching versions.'
+    $hostNames = ($remaining.Host | Sort-Object -Unique) -join ', '
+    throw "The previous Windhawk DLL is still loaded in $hostNames. The version was not switched."
 }
 try {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -85,10 +88,16 @@ try {
         }
         $source = Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8
         $version = [regex]::Match($source, '(?m)^// @version\s+(\S+)').Groups[1].Value
-        if ($version -notmatch '^0\.[345678]\.\d+$') { throw 'This installer is scoped to versions 0.3.x through 0.8.x.' }
+        if ($version -notmatch '^(0\.[345678]\.\d+|1\.\d+\.\d+)$') { throw 'Unsupported Better Visual version.' }
+        $includes = @([regex]::Matches($source, '(?m)^// @include[ \t]+([A-Za-z0-9._-]+\.exe)[ \t]*\r?$') |
+            ForEach-Object { $_.Groups[1].Value })
+        if ($includes -notcontains 'explorer.exe' -or $includes -notcontains 'magnify.exe') {
+            throw 'Missing required Explorer or Magnifier target in the mod metadata.'
+        }
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-        if ($manifest.version -ne $version -or $manifest.sourceSha256 -ne (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash -or
-            $manifest.dllSha256 -ne (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash) {
+        $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+        $dllHash = (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash
+        if ($manifest.version -ne $version -or $manifest.sourceSha256 -ne $sourceHash -or $manifest.dllSha256 -ne $dllHash) {
             throw 'Source and DLL do not match this build. Run scripts/check.ps1 again.'
         }
         $settingsRoot = $machine.OpenSubKey('SOFTWARE\Windhawk')
@@ -98,7 +107,7 @@ try {
         $modsPath = Join-Path $dataRoot 'Engine\Mods\64'
         $sourcesPath = Join-Path $dataRoot 'ModsSource'
         if (-not (Test-Path -LiteralPath $modsPath -PathType Container)) { throw 'Windhawk x64 mod directory was not found.' }
-        $fingerprint = (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash.Substring(0, 12).ToLowerInvariant()
+        $fingerprint = $dllHash.Substring(0, 12).ToLowerInvariant()
         $libraryName = $modId + '_' + $version + '_' + $fingerprint + '.dll'
         $existing = $machine.OpenSubKey($registryPath)
         if ($null -ne $existing) {
@@ -117,31 +126,33 @@ try {
         if ((Get-FileHash -LiteralPath $installedDll -Algorithm SHA256).Hash -ne $manifest.dllSha256) {
             throw 'The destination DLL does not match the checked build.'
         }
+        $previousIncludes = if ($previous -and $previous.ContainsKey('Include')) { $previous.Include.Value -split '\|' }
+        $processNames = @((@('explorer.exe', 'magnify.exe') + @($previousIncludes)) |
+            Where-Object { $_ -match '^[A-Za-z0-9._-]+\.exe$' } |
+            ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) } | Sort-Object -Unique)
         $session = (Get-Process -Id $PID).SessionId
-        $olderLibraries = @(Get-LoadedModLibraries $session | Where-Object { $_ -ne $libraryName })
+        $olderLibraries = @(Get-LoadedModLibraries $session $processNames | Where-Object Library -ne $libraryName)
         $key = $machine.CreateSubKey($registryPath, $true)
         $modified = $true
         if ($olderLibraries.Count -gt 0 -or $key.GetValue('LibraryFileName', '') -ne $libraryName) {
-            # Let Windhawk finish unloading both roles before exposing new IPC.
+            # Let Windhawk finish unloading the previous hosts before exposing new IPC.
             $key.SetValue('Disabled', 1, 'DWord')
             $key.Flush()
-            if ($olderLibraries.Count -gt 0) { Wait-PreviousModUnloaded $session $libraryName }
+            if ($olderLibraries.Count -gt 0) { Wait-PreviousModUnloaded $session $processNames $libraryName }
         }
         $sourceChanged = $true
         Copy-Item -LiteralPath $sourcePath -Destination $sourceDestination -Force
         $key.SetValue('LibraryFileName', $libraryName, 'String')
         $key.SetValue('Architecture', 'amd64', 'String')
-        $key.SetValue('Include', 'explorer.exe|magnify.exe', 'String')
+        $key.SetValue('Include', ($includes -join '|'), 'String')
         $key.SetValue('Exclude', '', 'String')
         $key.SetValue('Version', $version, 'String')
-        $key.SetValue('LoggingEnabled', 1, 'DWord')
-        $key.SetValue('DebugLoggingEnabled', 1, 'DWord')
         $key.SetValue('SettingsChangeTime', [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds(), 'DWord')
         $settings = $key.CreateSubKey('Settings', $true)
         try {
             $defaults = @{enabled=1; observeOnly=0; sensitivity=100; acceleration=35; invertPinch=0; threshold=3;
                 maxZoom=0; suppressStartupFeedback=1; smoothWheel=1; winWheel=1; wheelWindowSwitch=1; windowButtons=0; disableReading=1; wheelStep=20; instantHorizontalSwitch=1; normalZoomInOverview=1; keyboardInterop=1; keyboardStep=0; keyboardHoldMultiplier=2; hideMagnifier=1; keepPointerStable=1; mouseFollow='edges'; edgeMargin=12;
-                smoothing=0; fallbackHeight=60; debugLogging=0}
+                smoothing=0; fallbackHeight=60; debugLogging=0; darkLegacyWindows=1}
             foreach ($name in $defaults.Keys) {
                 if ($null -eq $settings.GetValue($name, $null)) {
                     $kind = if ($defaults[$name] -is [string]) { 'String' } else { 'DWord' }
@@ -163,7 +174,7 @@ try {
         $key.SetValue('Disabled', 0, 'DWord')
         $key.Flush()
         $result.success = $true
-        $result.message = "Configured local@kde-pinch-zoom $version. Windhawk manages loading Explorer and Magnifier."
+        $result.message = "Configured local@kde-pinch-zoom $version. Windhawk manages loading the configured Windows hosts."
         $result.library = $libraryName
     }
 } catch {
