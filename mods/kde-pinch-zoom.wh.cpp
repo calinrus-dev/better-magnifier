@@ -2009,11 +2009,11 @@ public:
         target_ = value;
         return true;
     }
-    bool submitWheel(double value) {
-        if (!nativeActive()) return target(value, true, bridge::InputSource::Wheel);
+    bool submitTarget(double value, bridge::InputSource source) {
+        if (!nativeActive()) return target(value, true, source);
         const auto* state = native_.get();
         const LONG sequence = state->requestedSequence;
-        return native_.requestLevel(value, keyboardRevision_, bridge::InputSource::Wheel) &&
+        return native_.requestLevel(value, keyboardRevision_, source) &&
                state->requestedSequence != sequence;
     }
     void end() {
@@ -2884,7 +2884,8 @@ class Host {
             const double frameMs = window_ ? wheelFramePeriod() / 10000.0 : 10;
             if (const auto level = wheel_.sample(motionTime, frameMs)) {
                 const long long previous = outstanding() ? state.requestedLevel : std::llround(zoom_.current() * 10000);
-                if (std::llround(*level * 10000) == previous || zoom_.submitWheel(*level)) wheel_.submitted(*level);
+                if (std::llround(*level * 10000) == previous ||
+                    zoom_.submitTarget(*level, bridge::InputSource::Wheel)) wheel_.submitted(*level);
             }
         }
         scheduleWheelFrame();
@@ -2913,8 +2914,8 @@ class Host {
             }
             if (!bridge_.magnifierAvailable() || !bridge_.gateAvailable()) continue;
             const double seed = *dev.coldPinchSeed;
-            dev.coldPinchSeed.reset(); // Deliver only once; no elapsed travel or repeated setter queue.
-            if (zoom_.target(seed, true, bridge::InputSource::Pinch)) {
+            if (zoom_.submitTarget(seed, bridge::InputSource::Pinch)) {
+                dev.coldPinchSeed.reset(); // Clear only after publishing, then resume from the original seed.
                 dev.recognizer.adoptZoom(seed);
                 dev.waitingForNative = false;
             }

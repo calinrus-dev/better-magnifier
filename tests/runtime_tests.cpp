@@ -95,6 +95,7 @@ struct HostTestAccess {
         host.frame(id, device, contacts, now, 16);
     }
     static bool seedPending(Host& host, HANDLE id) { return host.devices_[id].coldPinchSeed.has_value(); }
+    static void deliverSeed(Host& host, ULONGLONG now) { host.applyColdPinch(now); }
     static void activeDevice(Host& host, HANDLE id) { host.activeDevice_ = id; }
     static void restart(Host& host) { host.restartGestureTracking(); }
     static void configure(Host& host) { host.bridge_.configure(host.interactiveConfig()); }
@@ -736,6 +737,22 @@ int wmain(int argc, wchar_t** argv) {
         fixture.record.magnifierReady = 1; runtime::HostTestAccess::tick(fixture.host, 1100);
         require(fixture.record.requestedLevel == 10300 && fixture.record.requestedSequence == 1,
                 "a large first cold pinch is bounded to three percent rather than replayed at full travel");
+    }
+    {
+        HostFixture fixture(201, {1, 0, 0}); prepareColdPinch(fixture); beginColdPinch(fixture);
+        auto& record = fixture.record;
+        auto& host = fixture.host;
+        record.magnifierReady = 1;
+        InterlockedIncrement(&record.zoomRevision); // Change the native revision after the host sampled it.
+        runtime::HostTestAccess::deliverSeed(host, 1050);
+        require(runtime::HostTestAccess::seedPending(host, pinchDevice) && record.requestedSequence == 0,
+                "a stale native revision retains the cold pinch until it can publish");
+        runtime::HostTestAccess::tick(host, 1100);
+        runtime::HostTestAccess::tick(host, 1110);
+        require(!runtime::HostTestAccess::seedPending(host, pinchDevice) &&
+                record.requestedSequence == 1 && record.requestedLevel == 10300 &&
+                record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch),
+                "rebasing publishes the original cold pinch exactly once");
     }
     {
         HostFixture fixture(192, {2, 0, 0}); prepareColdPinch(fixture);
