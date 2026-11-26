@@ -8,7 +8,7 @@ Fecha de revisión: 26 de noviembre de 2026.
 - El adaptador simula un primer zoom cuyo cambio de renderizador se difiere. Cubre tanto un renderizador existente como su creación posterior, una suelta rápida de los dedos y el descarte de solicitudes obsoletas.
 - Las pruebas verifican que el touchpad y la rueda se pueden desactivar por separado, que desactivar el acorde deja pasar clics y que se reenvían directamente los eventos identificados como lápiz o pantalla táctil.
 - Una prueba con la ventana oculta verificó que cambiar el marco a azul y amarillo conserva su geometría y la exclusión de captura. También comprobó que se puede ocultar y volver a mostrar.
-- Queda pendiente reproducir físicamente la suelta rápida seguida de movimiento del ratón en esta compilación. Las pruebas del adaptador usan un renderizador simulado.
+- Prueba física en el equipo de desarrollo. Tras actualizar a la 1.1.0, el usuario hizo un pellizco corto, levantó rápido los dedos y movió el puntero hacia un borde. Confirmó que la vista ampliada volvió a seguir el puntero. Los demás escenarios del adaptador usan un renderizador simulado.
 
 ## Estado de 1.0.0
 
