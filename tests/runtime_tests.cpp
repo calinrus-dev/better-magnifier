@@ -15,6 +15,7 @@ BOOL WINAPI readView(float* level, int* x, int* y) {
 unsigned transformWrites = 0;
 BOOL WINAPI writeView(float level, int x, int y) { ++transformWrites; simulated = {level, x, y}; return TRUE; }
 BOOL WINAPI readCursor(POINT* point) { *point = cursor; return TRUE; }
+BOOL WINAPI failReadCursor(POINT*) { return FALSE; }
 bool queryFails = false;
 LONG queryFlags = WTS_SESSIONSTATE_UNLOCK;
 BOOL WINAPI querySession(HANDLE, DWORD, WTS_INFO_CLASS, LPWSTR* data, DWORD* bytes) {
@@ -73,6 +74,9 @@ struct HostTestAccess {
     static void nativeBackend(Host& host, bridge::Record& record) {
         host.zoom_.useTestBackend(readView, writeView, readCursor, true);
         host.zoom_.useTestNativeRecord(&record);
+    }
+    static void rejectZoomTarget(Host& host) {
+        host.zoom_.useTestBackend(readView, writeView, failReadCursor);
     }
     static void input(Host& host, int delta, LONG epoch, ULONGLONG now) { host.wheelInput(delta, epoch, now); }
     static void tick(Host& host, ULONGLONG now) { host.render(now); }
@@ -345,6 +349,22 @@ int wmain(int argc, wchar_t** argv) {
         runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.15), 1216);
         require(record.down && record.pinchFrameTime == 1216,
                 "a new physical pinch works after the abandoned gesture expires");
+    }
+    {
+        HostFixture fixture(13);
+        auto& record = fixture.record;
+        auto& host = fixture.host;
+        record.gateReady = 1;
+        record.shellPid = static_cast<LONG>(GetCurrentProcessId());
+        runtime::HostTestAccess::nativeBackend(host, record);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1), 1000);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.15), 1016);
+        require(record.down && record.pinchFrameTime == 1016,
+                "the active reader owns the touchpad before the backend rejects an update");
+        runtime::HostTestAccess::rejectZoomTarget(host);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1.2), 1032);
+        require(!record.down && !record.pinchFrameTime && record.phase == static_cast<LONG>(pinch::Phase::Pinch),
+                "a failed zoom update immediately releases mouse protection while keeping the pinch's shell completion classification");
     }
     HIDP_VALUE_CAPS caps{};
     caps.LogicalMin = -32768;

@@ -4,7 +4,8 @@ Fecha de revisión: 26 de noviembre de 2026.
 
 ## Estado de 1.0.0
 
-- Pasaron 1.005 comprobaciones automatizadas con Windhawk x64. Las pruebas de entrada cubren la llegada al 100 % por rueda y por pellizco, la inversión de la rueda desde el 100 % y el relevo entre los dos dispositivos, incluido un primer pellizco de ampliación con una muestra de composición atrasada. Las suites sintéticas no manipulan el escritorio.
+- Pasaron 1.007 comprobaciones automatizadas con Windhawk x64. Las pruebas de entrada cubren la llegada al 100 % por rueda y por pellizco, la inversión de la rueda desde el 100 % y el relevo entre los dos dispositivos, incluido un primer pellizco de ampliación con una muestra de composición atrasada. Las suites sintéticas no manipulan el escritorio.
+- Las pruebas comprueban que la protección del puntero se libera inmediatamente, incluso si el adaptador rechaza un objetivo y el gesto debe abandonarse.
 - El broker verifica el scroll lateral en ambos sentidos, el paso de su propio evento sin recapturarlo y la caducidad al desarmar o cambiar de modo. Usa endpoints simulados.
 - Una prueba del marco con la ventana oculta verificó WARP, la afinidad de exclusión, que la ventana está deshabilitada para entrada y un desplazamiento simulado al 1600 % y la descarga. Las pruebas de geometría comprueban cinco píxeles en los cuatro lados. Las pruebas ópticas documentadas para la 0.8.2 corresponden a su implementación anterior.
 - Una prueba aislada cargó la DLL compilada y comprobó los colores de los diálogos y de edición en un DC de Windows, y el nombre del recurso oscuro de botones. Esta prueba no abre las interfaces de Explorer.

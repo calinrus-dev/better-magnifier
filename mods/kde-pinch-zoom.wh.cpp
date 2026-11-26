@@ -2787,6 +2787,13 @@ class Host {
             }
         }
     }
+    void releaseAbandonedPinch(HANDLE device) {
+        if (activeDevice_ != device) return;
+        activeDevice_ = nullptr;
+        bridge_.publish(pinch::Phase::Idle, false, zoomInputEnabled());
+        zoom_.end();
+        bridge_.syncNative();
+    }
     void releaseExpiredPinch(std::uint64_t now) {
         auto* state = bridge_.get();
         if (!state || !bridge::pinchDown(*state) || bridge::pinchFrameFresh(*state, now)) return;
@@ -3129,8 +3136,11 @@ class Host {
             compatibility::nativeDeclined(static_cast<std::uint32_t>(record->nativeCaps), record->resolverReasonNative)) phase = pinch::Phase::Swipe;
         if (auto* record = bridge_.get()) InterlockedExchange(&record->swipeDirection,
             phase == pinch::Phase::Swipe ? pinch::swipeDirection(dev.recognizer.movement()) : 0);
-        if (auto* state = bridge_.get(); state && before == pinch::Phase::Pinch && phase != pinch::Phase::Pinch)
+        if (auto* state = bridge_.get(); state && before == pinch::Phase::Pinch && phase != pinch::Phase::Pinch) {
+            // Release pointer protection before processing any wheel input from before lift.
+            InterlockedExchange64(&state->pinchFrameTime, 0);
             renderWheel(*state, now); // Fold input captured before the physical lift into this pinch's final target.
+        }
         bridge_.publish(phase, dev.activeContacts == 3, !config_.observeOnly, now);
         if (before == pinch::Phase::Pinch && decision.phase != pinch::Phase::Pinch) {
             zoom_.end();
@@ -3199,7 +3209,7 @@ class Host {
                 state->requestSource == static_cast<LONG>(bridge::InputSource::PinchWheel);
             if (!config_.observeOnly && !sameWheelFloor && !zoom_.target(*decision.zoom, decision.began)) {
                 dev.recognizer.reset();
-                activeDevice_ = nullptr;
+                releaseAbandonedPinch(handle);
             }
             // Apply on the input frame, without waiting for the 16 ms timer.
             if (!config_.observeOnly) render(now);
@@ -3245,9 +3255,9 @@ class Host {
             ULONG usageCount = static_cast<ULONG>(usages.size());
             if (HidP_GetUsages(HidP_Input, kDigitizer, slot.collection, usages.data(),
                                &usageCount, data, bytes, length) != HIDP_STATUS_SUCCESS) {
-                // A malformed report must not become a spurious release.
                 dev.assembler.reset();
                 dev.recognizer.reset();
+                releaseAbandonedPinch(handle);
                 return;
             }
             const auto end = usages.begin() + usageCount;

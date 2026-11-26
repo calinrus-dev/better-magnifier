@@ -4,6 +4,7 @@
 
 - Better Magnifier pasa a llamarse **Better Visual**. Las instalaciones locales conservan su identificador y sus ajustes.
 - La rueda conserva el modo activo al volver al 100 %. Un pellizco que vuelve al 100 % lo apaga. Al pasar de rueda a pellizco se descartan los movimientos pendientes y un gesto de ampliación conserva al menos el nivel confirmado por la Lupa.
+- La protección del puntero se libera en cuanto termina el pellizco o se pierde su seguimiento.
 - El marco conserva cinco píxeles físicos. Se actualizan los cuatro lados juntos y la ventana transparente queda fuera de la detección del puntero.
 - La rueda lateral desplaza verticalmente con el modo activo. El evento convertido sale del hook de entrada y se marca para que no vuelva al zoom.
 - Tema oscuro para interfaces clásicas compatibles de Windows 11. Sigue el modo de aplicaciones de Windows y respeta el alto contraste.
