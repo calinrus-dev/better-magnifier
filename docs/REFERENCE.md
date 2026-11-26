@@ -1,6 +1,6 @@
 # Referencia de Better Visual
 
-[Inicio](../README.md) · [Descargas](https://github.com/calinrus-dev/better-magnifier/releases/tag/v1.1.0) · [Validación](VALIDATION.md)
+[Inicio](../README.md) · [Descargas](https://github.com/calinrus-dev/better-magnifier/releases/tag/v1.2.0) · [Validación](VALIDATION.md)
 
 ## Instalación local y actualización
 
@@ -31,7 +31,7 @@ Los nombres de los ajustes coinciden con la pestaña **Ajustes** del mod.
 - **Desactivar controles del touchpad** deja a Windows sus gestos de tres dedos. El núcleo y la rueda siguen disponibles según sus propios ajustes.
 - **Desactivar controles del ratón** deja el ratón con el comportamiento de Windows. El pellizco y el teclado pueden seguir ampliando.
 - **Desactivar acorde de clic izquierdo y derecho** conserva la rueda y deja pasar los clics ordinarios directamente. Con el acorde activo, el primer botón puede esperar hasta 45 ms. Los mensajes de ratón identificados por Windows como lápiz o pantalla táctil se dejan pasar. [Identificación de eventos de lápiz y pantalla táctil](https://learn.microsoft.com/windows/win32/tablet/system-events-and-mouse-messages)
-- **Modo oscuro para interfaces clásicas de Windows** funciona con un ajuste propio, además de los controles de zoom.
+- **Modo oscuro para diálogos clásicos de Windows** funciona con un ajuste propio, además de los controles de zoom.
 - **Color del marco del zoom** elige rojo, azul o amarillo. **Ocultar marco del zoom** oculta el indicador mientras la ampliación sigue disponible.
 
 ### Pellizco y teclado
@@ -56,7 +56,7 @@ Los nombres de los ajustes coinciden con la pestaña **Ajustes** del mod.
 - **Hide Windows Magnifier window and touch controls** oculta la interfaz de la Lupa mientras su motor permanece disponible. **Suppress Magnifier startup feedback cursor** solicita que Windows omita el indicador azul al arrancarla.
 - **Disable Magnifier click-to-read and its reading cursor** evita activar la lectura de la Lupa mediante **Ctrl + Alt + clic izquierdo** en binarios compatibles. Si la lectura ya estaba activa, sal de ella o vuelve a abrir la Lupa. Narrador y los demás atajos de lectura conservan su función.
 - **Native Windows Magnifier integration** combina el pellizco, la rueda continua y los atajos. Puedes desactivar la integración para usar los controles estándar de la Lupa.
-- **Dark mode for classic Windows interfaces** usa el tema de aplicaciones de Windows y respeta alto contraste. Se aplica a determinados diálogos y hojas de propiedades de Explorer y de varios applets de Windows, y a menús emergentes estándar de Explorer, Regedit y MMC cuando el perfil correspondiente está verificado. La portada y categorías del Panel de control y Herramientas de Windows conservan su tema de Windows.
+- **Dark mode for classic Windows dialogs** usa el tema de aplicaciones de Windows y respeta alto contraste. Se aplica a determinados diálogos y hojas de propiedades de Explorer y de varios applets de Windows. Los menús, la portada y las categorías del Panel de control usan los recursos nativos de Windows.
 
 ## Vista y captura
 
@@ -84,9 +84,11 @@ La medición predeterminada muestrea cinco segundos de CPU y memoria de los proc
 
 ## Compatibilidad tras actualizaciones de Windows
 
-El lector HID y el filtro de gestos se ejecutan en Explorer. El complemento de Magnify se comunica con ese controlador para aplicar objetivos sobre la Lupa en pantalla completa. La integración nativa de zoom requiere Windows 11 x64 en la compilación 26200. La versión probada es 26200.9711 con Windhawk 1.7.3. Para el pellizco se requiere un Precision Touchpad con contactos HID. El tema oscuro tiene su propia comprobación de compatibilidad. Los modos lente y acoplado y el escritorio seguro de UAC quedan fuera del alcance. Consulta la [validación](VALIDATION.md) para combinaciones pendientes, como DPI mixtos y distintos monitores.
+El lector HID y el filtro de gestos se ejecutan en Explorer. El complemento de Magnify se comunica con ese controlador para aplicar objetivos sobre la Lupa en pantalla completa. La integración nativa de zoom en Windows 11 x64 usa perfiles locales para las imágenes de las compilaciones 26200.9711 y 26200.9974 con Windhawk 1.7.3. Para el pellizco se requiere un Precision Touchpad con contactos HID. El tema oscuro tiene su propia comprobación de compatibilidad. Los modos lente y acoplado y el escritorio seguro de UAC quedan fuera del alcance. Consulta la [validación](VALIDATION.md) para combinaciones pendientes, como DPI mixtos y distintos monitores.
 
-Los perfiles locales verifican el GUID y la edad CodeView, el tamaño, el timestamp PE y las secciones de destino. Si cambia la identidad del binario, las compilaciones admitidas prueban símbolos de Microsoft y validan las direcciones por grupos de capacidades. Si falta el filtro del shell, la rueda puede seguir disponible. Si falta el núcleo, se usan la Lupa visible y sus atajos estándar.
+Cada perfil local verifica el GUID y la edad CodeView, el tamaño, el timestamp PE y las secciones de destino. La identidad del binario decide si puede usarse ese perfil. Cuando falta un perfil en la compilación 26200, se buscan firmas exactas por medio de la caché de Windhawk y de los PDB de Microsoft. La validación de direcciones se aplica antes de activar cada grupo de funciones.
+
+Si Windows cambia una función opcional, el motor conserva las funciones cuyos grupos completos siguen disponibles. Por ejemplo, sin la protección de puntero verificada se usa el seguimiento nativo. Si falta el filtro del shell, el touchpad conserva sus gestos normales y el teclado y la rueda pueden seguir ampliando si el motor está disponible. Si falta el núcleo, se usan la Lupa visible y sus atajos estándar.
 
 El arranque en frío conserva una muesca de rueda por un máximo de 1,5 segundos o un primer aumento de pellizco de hasta 3 % si los tres dedos siguen apoyados. Bloqueo, suspensión y desconexión invalidan las entradas pendientes. El diagnóstico muestra las capacidades y el estado del motor.
 

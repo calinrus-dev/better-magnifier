@@ -2,6 +2,13 @@
 
 Fecha de revisión: 26 de noviembre de 2026.
 
+## Estado de 1.2.0
+
+- Pasaron 1.032 comprobaciones automatizadas. El resolver de producción identificó las tres imágenes del equipo mapeadas sin ejecución, sin descargar símbolos.
+- Windows 11 25H2 26200.9974. La 1.1.0 arrancaba mediante símbolos y perdía la recuperación por procedimientos de ventana de Magnify y el perfil de lectura al señalar. [KB5132061 de Microsoft](https://support.microsoft.com/en-au/servicing/os/windows-11/2026/11/kb5132061-windows-11-24h2-25h2-26h2-security-update).
+- Se verificaron los perfiles actuales de Magnify, twinui.pcshell y Explorer con los PDB de Microsoft correspondientes. Las funciones se comprobaron en código ejecutable y el indicador de escritorio en datos escribibles. Se preservaron los perfiles anteriores.
+- Las pruebas comprueban la degradación por grupos al faltar funciones opcionales, incluida la protección del puntero, y la compatibilidad con imágenes verificadas. Están separadas de la prueba de gestos con hardware físico.
+
 ## Estado de 1.1.0
 
 - Pasaron 1.028 comprobaciones automatizadas con el compilador x64 de Windhawk.

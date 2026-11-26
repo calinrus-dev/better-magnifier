@@ -497,19 +497,25 @@ int main() {
         require(!launch.mayLaunch(9000), "Win Esc before READY still causes startup retries");
         launch.request(); require(launch.mayLaunch(9000), "fresh physical input cannot recover after early close");
     });
+    test("live symbols are allowed in the verified Windows build family", [] {
+        require(compatibility::symbolAbiVerifiedOn(26200) && !compatibility::symbolAbiVerifiedOn(26100) &&
+                !compatibility::symbolAbiVerifiedOn(26300), "an unknown OS family needs an exact verified image");
+    });
     test("missing optional native symbols preserve the continuous core", [] {
         constexpr auto all = (1u << 12) - 1;
-        for (unsigned index : {6, 8, 9}) {
+        for (unsigned index : {6, 7, 8, 9}) {
             const auto plan = compatibility::nativePlan(all & ~compatibility::symbol(index));
             require(plan.supported && (plan.capabilities & compatibility::NativeCore), "optional native symbol disabled the entire backend");
         }
+        require(!(compatibility::nativePlan(all & ~compatibility::symbol(7)).capabilities & compatibility::NativePointerGuard),
+                "missing pointer stabilization falls back to native pointer tracking");
         require(compatibility::nativePlan(all & ~compatibility::symbol(4)).supported, "window bootstrap cannot replace absent Run");
         require(!(compatibility::nativePlan(all & ~compatibility::symbol(10)).capabilities & compatibility::NativeBootstrapWindows),
                 "one WndProc cannot enable a half bootstrap group");
     });
     test("missing required native symbols preserve Windows instead of installing partial hooks", [] {
         constexpr auto all = (1u << 12) - 1;
-        for (unsigned index : {0, 1, 2, 3, 5, 7}) require(!compatibility::nativePlan(all & ~compatibility::symbol(index)).supported,
+        for (unsigned index : {0, 1, 2, 3, 5}) require(!compatibility::nativePlan(all & ~compatibility::symbol(index)).supported,
             "missing native core still allowed unsafe private calls");
         require(!compatibility::nativePlan(all & ~compatibility::symbol(4) & ~compatibility::symbol(11)).supported,
             "missing both bootstrap routes still allowed private calls");

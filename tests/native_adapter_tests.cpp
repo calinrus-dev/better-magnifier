@@ -839,7 +839,9 @@ int wmain() {
     std::array<void*, 3> readingTargets{};
     require(!magnifier::resolveReadingTargets(nullptr, readingTargets), "missing optional reading image fails closed without hooks");
     const auto& readingProfile = binary_profiles::profiles[0];
-    std::vector<BYTE> readingImage(readingProfile.identity.imageSize);
+    constexpr binary_profiles::Identity updatedMagnify{{0xc5,0x46,0x12,0xd6,0x1f,0x4c,0x82,0xa8,
+        0x21,0x05,0xd4,0x0b,0xd8,0xf3,0x63,0xde}, 1, 0x14c000, 0x88b3d475};
+    std::vector<BYTE> readingImage(updatedMagnify.imageSize);
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(readingImage.data());
     dos->e_magic = IMAGE_DOS_SIGNATURE; dos->e_lfanew = 0x80;
     auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(readingImage.data() + dos->e_lfanew);
@@ -867,6 +869,20 @@ int wmain() {
     --codeView[20]; section->VirtualAddress = 0x72840; section->Misc.VirtualSize = 0x10;
     require(!magnifier::resolveReadingTargets(readingModule, readingTargets) && !readingTargets[0],
             "a partial optional reading group never activates capture-only or cursor-only interception");
+    section->VirtualAddress = 0x1000; section->Misc.VirtualSize = 0xee000;
+    nt->OptionalHeader.SizeOfImage = updatedMagnify.imageSize;
+    std::copy(updatedMagnify.guid.begin(), updatedMagnify.guid.end(), codeView + 4);
+    require(!magnifier::resolveReadingTargets(readingModule, readingTargets) && !readingTargets[0],
+            "the new CodeView entry alone cannot admit a different image");
+    nt->FileHeader.TimeDateStamp = updatedMagnify.timestamp;
+    require(magnifier::resolveReadingTargets(readingModule, readingTargets) &&
+            readingTargets == std::array<void*, 3>{readingImage.data() + 0x76190, readingImage.data() + 0x8fdac,
+                                                     readingImage.data() + 0x8fe6c},
+            "the updated Magnify image uses its own independent read-from-point entries");
+    void* updatedTargets[12]{};
+    require(binary_profiles::resolve(readingModule, binary_profiles::Kind::Magnifier, updatedTargets, 12) &&
+            updatedTargets[10] == readingImage.data() + 0x58b20 && updatedTargets[11] == readingImage.data() + 0x2b460,
+            "the updated Magnify image restores both verified window-procedure targets");
     currentMode = 3; state.winWheel = 1; state.wheelWindowSwitch = 1;
     InterlockedExchange64(&state.windowWheelPacket, 0);
     const int wheelBeforeLens = originalWheelCalls;

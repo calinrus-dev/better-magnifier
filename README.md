@@ -1,24 +1,24 @@
 # Better Visual
 
-**Zoom continuo del escritorio para Windows 11 x64, compilación 26200.** Mod de accesibilidad para Windhawk, inspirado en KWin. Amplía texto y detalles con un pellizco de tres dedos, la rueda del ratón o el teclado. La Lupa de Windows se encarga de renderizar la vista y seguir el puntero.
+**Zoom continuo del escritorio para Windows 11 x64.** Mod de accesibilidad para Windhawk, inspirado en KWin. Amplía texto y detalles con un pellizco de tres dedos, la rueda del ratón o el teclado. La Lupa de Windows se encarga de renderizar la vista y seguir el puntero.
 
-[**Descargar 1.1.0**](https://github.com/calinrus-dev/better-magnifier/releases/tag/v1.1.0) · [Ajustes y diagnóstico](docs/REFERENCE.md) · [Validación](docs/VALIDATION.md)
+[**Descargar 1.2.0**](https://github.com/calinrus-dev/better-magnifier/releases/tag/v1.2.0) · [Ajustes y diagnóstico](docs/REFERENCE.md) · [Validación](docs/VALIDATION.md)
 
 [![Compilación y pruebas](https://github.com/calinrus-dev/better-magnifier/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/calinrus-dev/better-magnifier/actions/workflows/ci.yml)
 
-> **Zoom nativo** · Requiere la compilación 26200 y la Lupa en pantalla completa. Probado con Windows 11 26200.9711 y Windhawk 1.7.3. Para usar el pellizco se requiere un Precision Touchpad con contactos HID.
+> **Zoom nativo** · Perfiles incluidos para Windows 11 25H2, compilaciones 26200.9711 y 26200.9974, con Windhawk 1.7.3 y Lupa en pantalla completa. El pellizco requiere un Precision Touchpad con contactos HID. [Compatibilidad tras actualizar Windows](docs/REFERENCE.md#compatibilidad-tras-actualizaciones-de-windows)
 
 ## Instalar
 
-**Desde Windhawk.** Descarga [better-visual.wh.cpp](https://github.com/calinrus-dev/better-magnifier/releases/download/v1.1.0/better-visual.wh.cpp). Elige **Crear un nuevo Mod**, sustituye el ejemplo por el archivo completo y compila. Para actualizar Better Magnifier, edita el mod local existente. Better Visual conserva su identificador, `local@kde-pinch-zoom`.
+**Desde Windhawk.** Descarga [better-visual.wh.cpp](https://github.com/calinrus-dev/better-magnifier/releases/download/v1.2.0/better-visual.wh.cpp). Elige **Crear un nuevo Mod**, sustituye el ejemplo por el archivo completo y compila. Para actualizar Better Magnifier, edita el mod local existente. Better Visual conserva su identificador, `local@kde-pinch-zoom`.
 
-**Paquete compilado x64.** Descarga el [ZIP para Windows](https://github.com/calinrus-dev/better-magnifier/releases/download/v1.1.0/better-visual-1.1.0-windows-x64.zip), extráelo completo y ejecuta este comando desde su carpeta en PowerShell como administrador.
+**Paquete compilado x64.** Descarga el [ZIP para Windows](https://github.com/calinrus-dev/better-magnifier/releases/download/v1.2.0/better-visual-1.2.0-windows-x64.zip), extráelo completo y ejecuta este comando desde su carpeta en PowerShell como administrador.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-local.ps1
 ```
 
-La publicación incluye [SHA256SUMS.txt](https://github.com/calinrus-dev/better-magnifier/releases/download/v1.1.0/SHA256SUMS.txt). El instalador conserva tus ajustes y revierte el cambio si Windhawk aún está descargando la DLL anterior. Consulta la [guía de instalación y actualización](docs/REFERENCE.md#instalación-local-y-actualización) si vienes de una versión anterior.
+La publicación incluye [SHA256SUMS.txt](https://github.com/calinrus-dev/better-magnifier/releases/download/v1.2.0/SHA256SUMS.txt). El instalador conserva tus ajustes y revierte el cambio si Windhawk aún está descargando la DLL anterior. Consulta la [guía de instalación y actualización](docs/REFERENCE.md#instalación-local-y-actualización) si vienes de una versión anterior.
 
 ## Elige las funciones
 
@@ -41,7 +41,7 @@ El marco de cinco píxeles señala que el modo de zoom del ratón está activo y
 
 - **Seguimiento.** En **Configuración → Accesibilidad → Lupa → Vista** puedes elegir si la vista sigue al puntero en los bordes o lo mantiene centrado. También puedes ajustar el seguimiento del foco y el cursor de texto.
 - **Captura.** En OBS, **Captura de ventana** permite compartir una aplicación a su escala normal. Para compartir un monitor, consulta los [resultados por método de captura](docs/REFERENCE.md#vista-y-captura).
-- **Tema oscuro.** El ajuste de Windhawk sigue el modo de aplicaciones de Windows y respeta alto contraste. Cubre diálogos, hojas de propiedades y menús emergentes clásicos compatibles. La página principal del Panel de control conserva su tema de Windows.
+- **Tema oscuro.** El ajuste de Windhawk sigue el modo de aplicaciones de Windows y respeta alto contraste. Cubre diálogos y hojas de propiedades clásicos compatibles. Windows dibuja los menús y la página principal del Panel de control.
 
 ## Desarrollo
 

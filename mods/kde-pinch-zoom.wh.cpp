@@ -2,9 +2,9 @@
 // @id              kde-pinch-zoom
 // @name            Better Visual
 // @name:es-ES      Better Visual
-// @description     Smooth desktop zoom and system-aware dark mode for classic Windows interfaces
-// @description:es-ES Zoom fluido del escritorio y tema oscuro para interfaces clásicas de Windows
-// @version         1.1.0
+// @description     Smooth desktop zoom and system-aware dark mode for Windows dialogs
+// @description:es-ES Zoom fluido del escritorio y tema oscuro para diálogos de Windows
+// @version         1.2.0
 // @author          calinrus-dev
 // @github          https://github.com/calinrus-dev
 // @homepage        https://github.com/calinrus-dev/better-magnifier
@@ -44,12 +44,13 @@ toggle it without changing the current scale. In this mode the main wheel
 zooms, its click resets, and the side wheel scrolls vertically. Win+plus/minus
 also works with the numeric keypad. Use WGC to share at normal scale.
 
-The classic Windows theme follows the system apps theme and contrast themes.
-Supported Windows property dialogs, Control Panel applet dialogs and popup
-menus can use dark surfaces while following the Windows app theme.
+The optional dark theme applies to supported Windows property and Control
+Panel dialogs. It follows Windows app mode and respects contrast themes.
+Windows renders its menus.
 Ctrl+Alt+wheel switches windows. The mouse profile is configurable.
 Two-finger app zoom and Windows three/four-finger swipe settings are untouched.
-A Precision Touchpad and Windows build 26200 are required. A companion in
+Pinch zoom requires a Precision Touchpad and compatible Windows binaries.
+Verified Windows 11 25H2 binaries work offline. A companion in
 Explorer holds native app-switch/task-view swipes until the gesture is classified.
 Pinches suppress those swipes; vertical swipes use the original Windows handler.
 Horizontal swipes switch windows directly by default (configurable).
@@ -89,9 +90,10 @@ https://github.com/calinrus-dev/better-magnifier
   $name:es-ES: Desactivar acorde de clic izquierdo y derecho
   $description: Passes ordinary clicks directly to applications while keeping wheel zoom available.
 - darkLegacyWindows: true
-  $name: Dark mode for classic Windows interfaces
-  $name:es-ES: Modo oscuro para interfaces clásicas de Windows
-  $description: Follows Windows app mode and preserves Windows contrast themes.
+  $name: Dark mode for classic Windows dialogs
+  $name:es-ES: Modo oscuro para diálogos clásicos de Windows
+  $description: Follows Windows app mode for supported dialogs and respects contrast themes.
+  $description:es-ES: Sigue el modo de aplicaciones de Windows en los diálogos compatibles y respeta los temas de contraste.
 - observeOnly: false
   $name: Observe only (recognition without zoom)
 - sensitivity: 100
@@ -810,7 +812,7 @@ namespace compatibility {
 enum NativeCapability : std::uint32_t {
     NativeCore = 1, NativeKeyboardObserver = 2, NativeWheel = 4,
     NativeViewportRestore = 8, NativeBootstrapRun = 16,
-    NativeBootstrapWindows = 32, NativeHideUi = 64
+    NativeBootstrapWindows = 32, NativeHideUi = 64, NativePointerGuard = 128
 };
 enum GateCapability : std::uint32_t {
     GateSwipe = 1, GateVisibility = 2, GateDesktop = 4
@@ -822,7 +824,7 @@ struct Plan {
 };
 constexpr Plan nativePlan(std::uint32_t found) {
     constexpr auto required = symbol(0) | symbol(1) | symbol(2) |
-                              symbol(3) | symbol(5) | symbol(7);
+                              symbol(3) | symbol(5);
     constexpr auto windows = symbol(10) | symbol(11);
     if ((found & required) != required ||
         (!(found & symbol(4)) && (found & windows) != windows)) return {};
@@ -832,6 +834,7 @@ constexpr Plan nativePlan(std::uint32_t found) {
     if (found & symbol(6)) capabilities |= NativeKeyboardObserver;
     if (found & symbol(8)) capabilities |= NativeViewportRestore;
     if (found & symbol(9)) capabilities |= NativeWheel;
+    if (found & symbol(7)) capabilities |= NativePointerGuard;
     return {capabilities, true};
 }
 constexpr Plan gatePlan(std::uint32_t found, bool desktop) {
@@ -843,6 +846,7 @@ constexpr Plan gatePlan(std::uint32_t found, bool desktop) {
     if (desktop) capabilities |= GateDesktop;
     return {capabilities, true};
 }
+constexpr bool symbolAbiVerifiedOn(std::uint32_t build) { return build == 26200; }
 constexpr bool nativeDeclined(std::uint32_t capabilities, long reason) {
     return reason != 0 && !(capabilities & NativeCore);
 }
@@ -880,7 +884,7 @@ constexpr bool overviewAllowed(std::uint32_t native, std::uint32_t gate) {
 #include <string>
 
 #ifndef PINCH_ZOOM_STANDALONE
-#include <windhawk_api.h>
+#include <windhawk_utils.h>
 #endif
 
 // Offline profiles are tied to the loaded image's exact CodeView GUID/age,
@@ -900,8 +904,13 @@ struct Profile {
 };
 constexpr Profile profiles[] = {
     {Kind::Magnifier, {{0x99,0x46,0x73,0xd3,0xf7,0xad,0x69,0xbc,0x0b,0x62,0xa7,0xf4,0x56,0x60,0x23,0x4f},1,0x130000,0x5a1425a3}, {0x258ac,0x78108,0x77a7c,0x77b3c,0x547b0,0x52d3c,0x53330,0x1c2e8,0x2852c,0x52aa4,0x55a20,0x2a520}, 12},
+    // Magnify.exe 10.0.26100.9949: matching Microsoft PDB, both static window procedures verified against GWLP_USERDATA.
+    {Kind::Magnifier, {{0xc5,0x46,0x12,0xd6,0x1f,0x4c,0x82,0xa8,0x21,0x05,0xd4,0x0b,0xd8,0xf3,0x63,0xde},1,0x14c000,0x88b3d475}, {0x2605c,0x7bdf8,0x7b76c,0x7b82c,0x57750,0x55d48,0x56360,0x1bae8,0x29498,0x55ac4,0x58b20,0x2b460}, 12},
     {Kind::Shell, {{0xda,0xf3,0x07,0x95,0x7f,0xd4,0x02,0x5f,0x65,0x69,0xfc,0x50,0x27,0x3c,0x40,0xd7},1,0x9a5000,0xbc86bb4d}, {0x16bec0,0x16c2c0,0x16bde0,0x4d5ee0,0x2198b0,0x216860}, 6},
     {Kind::Desktop, {{0x27,0x6f,0x66,0x1d,0x2f,0xba,0x88,0x85,0x58,0x88,0xd3,0xe2,0xb9,0x4b,0x0f,0xd8},1,0x344000,0xbee7e13f}, {0x2839dc}, 1},
+    // KB5132061. Matching Microsoft public PDBs establish the shell entry points and desktop int.
+    {Kind::Shell, {{0xb1,0x64,0x02,0x0c,0x91,0xdc,0x0a,0x4a,0xcf,0x98,0xda,0x9b,0xd6,0xf2,0x02,0x29},1,0x9d3000,0x59290a19}, {0x1dc0b0,0x1dc3b0,0x1dbfd0,0x4f9250,0x2593f0,0x2549c0}, 6},
+    {Kind::Desktop, {{0xeb,0x18,0x23,0x26,0x1b,0xdb,0x78,0x15,0x04,0x13,0x22,0xf5,0x6c,0x2f,0xf6,0x99},1,0x328000,0xc21d280b}, {0x2677d8}, 1},
 };
 inline bool range(DWORD rva, std::size_t length, DWORD imageSize) {
     return rva <= imageSize && length <= imageSize - rva;
@@ -968,6 +977,37 @@ bool resolve(HMODULE module, Kind kind, void** targets, std::size_t count) {
     }
     return false;
 }
+#ifndef PINCH_ZOOM_STANDALONE
+bool canUseSymbols() {
+    using GetVersion = LONG(WINAPI*)(OSVERSIONINFOW*);
+    const auto getVersion = reinterpret_cast<GetVersion>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+    OSVERSIONINFOW version{};
+    version.dwOSVersionInfoSize = sizeof(version);
+    return getVersion && getVersion(&version) == 0 && compatibility::symbolAbiVerifiedOn(version.dwBuildNumber);
+}
+
+template<std::size_t N>
+bool resolveSymbols(HMODULE module, const wchar_t* const (&names)[N], void* (&targets)[N], bool data = false) {
+    std::fill_n(targets, N, nullptr);
+    if (!identify(module)) return false;
+    std::array<WindhawkUtils::SYMBOL_HOOK, N> lookups;
+    for (std::size_t i = 0; i < N; ++i) {
+        lookups[i] = WindhawkUtils::SYMBOL_HOOK({names[i]}, &targets[i], nullptr, true);
+    }
+    // Resolve addresses only, using the local Windhawk cache or Microsoft PDBs.
+    // Capability groups decide which complete sets are safe to hook.
+    WH_HOOK_SYMBOLS_OPTIONS options{sizeof(options), nullptr, TRUE, L""};
+    if (!WindhawkUtils::HookSymbols(module, lookups.data(), lookups.size(), &options)) {
+        std::fill_n(targets, N, nullptr);
+        return false;
+    }
+    for (auto& target : targets) if (target) {
+        const auto offset = reinterpret_cast<ULONG_PTR>(target) - reinterpret_cast<ULONG_PTR>(module);
+        if (offset > MAXDWORD || !permitted(module, static_cast<DWORD>(offset), data)) target = nullptr;
+    }
+    return std::any_of(std::begin(targets), std::end(targets), [](void* target) { return target != nullptr; });
+}
+#endif
 } // namespace binary_profiles
 
 namespace bridge {
@@ -3761,7 +3801,9 @@ int wmain(int argc, wchar_t** argv) {
         if (inspector.initialize()) std::printf("Windows Magnifier: %s; pid=%ld; hidden=%ld; keyboardCommands=%ld; lastError=%ld; actualZoom=%.2f%%\n",
             mapping.magnifierAvailable() ? "READY" : "NOT LOADED", record->magnifierPid,
             record->hideUi, record->nativeCommands, record->nativeError, inspector.rendered() * 100);
-        std::printf("Pointer protection: blocked=%ld; lastOriginRva=0x%lx; threeFingersDown=%ld\n", record->blockedCursorMoves, static_cast<unsigned long>(record->lastCursorOrigin), record->down);
+        std::printf("Pointer protection: available=%d; blocked=%ld; lastOriginRva=0x%lx; threeFingersDown=%ld\n",
+                    !!(record->nativeCaps & compatibility::NativePointerGuard),
+                    record->blockedCursorMoves, static_cast<unsigned long>(record->lastCursorOrigin), record->down);
         std::printf("Compatibility: nativeCaps=0x%lx; gateCaps=0x%lx; nativeReason=%ld; gateReason=%ld\n", record->nativeCaps, record->gateCaps, record->resolverReasonNative, record->resolverReasonGate);
         std::printf("Resolvers: native=%ld; shell=%ld; desktop=%ld (1=offline verified, 2=symbols)\n", record->resolverModeNative, record->resolverModeGate, record->resolverModeDesktop);
         std::printf("Keyboard hold: progressiveSpeed=%ld; replacedRepeats=%ld; releaseFreezes=%ld\n", record->keyboardHoldMultiplier, record->keyboardHoldRepeats, record->keyboardHoldFreezes);
@@ -3998,19 +4040,30 @@ bool readPointDefault(const void* self) {
 }
 bool resolveReadingTargets(HMODULE module, std::array<void*, 3>& targets) {
     targets.fill(nullptr);
-    // PDB-verified ABI for this exact image only:
+    // PDB-verified ABI for these exact images only:
     // FocusTracker::RegisterReadFromPointInput() void(this), and both private
     // MousePointerStateManager::SetReadFromPointMouseCursors...() bool(const this).
-    // Keep this identity independent of the core profiles: updating a core
+    // Keep these identities independent of the core profiles: updating a core
     // profile must not silently approve unreviewed reading ABI/offsets.
-    constexpr binary_profiles::Identity verified{{0x99,0x46,0x73,0xd3,0xf7,0xad,0x69,0xbc,
-        0x0b,0x62,0xa7,0xf4,0x56,0x60,0x23,0x4f}, 1, 0x130000, 0x5a1425a3};
-    constexpr std::array<DWORD, 3> rvas{0x72840, 0x898f8, 0x899bc};
+    struct ReadingProfile {
+        binary_profiles::Identity identity;
+        std::array<DWORD, 3> rvas;
+    };
+    constexpr ReadingProfile profiles[] = {
+        {{{0x99,0x46,0x73,0xd3,0xf7,0xad,0x69,0xbc,0x0b,0x62,0xa7,0xf4,0x56,0x60,0x23,0x4f},
+          1, 0x130000, 0x5a1425a3}, {0x72840, 0x898f8, 0x899bc}},
+        {{{0xc5,0x46,0x12,0xd6,0x1f,0x4c,0x82,0xa8,0x21,0x05,0xd4,0x0b,0xd8,0xf3,0x63,0xde},
+          1, 0x14c000, 0x88b3d475}, {0x76190, 0x8fdac, 0x8fe6c}},
+    };
     const auto identity = binary_profiles::identify(module);
-    if (!identity || *identity != verified) return false;
-    for (const auto rva : rvas) if (!binary_profiles::permitted(module, rva, false)) return false;
-    for (std::size_t i = 0; i < targets.size(); ++i) targets[i] = reinterpret_cast<BYTE*>(module) + rvas[i];
-    return true;
+    if (!identity) return false;
+    for (const auto& profile : profiles) {
+        if (profile.identity != *identity) continue;
+        for (const auto rva : profile.rvas) if (!binary_profiles::permitted(module, rva, false)) return false;
+        for (std::size_t i = 0; i < targets.size(); ++i) targets[i] = reinterpret_cast<BYTE*>(module) + profile.rvas[i];
+        return true;
+    }
+    return false;
 }
 #ifndef PINCH_ZOOM_NATIVE_TEST
 void installReadingHooks(HMODULE module) {
@@ -5195,7 +5248,7 @@ DWORD WINAPI probeNativeUiOwner(void* stopParameter) {
     return 0;
 }
 #ifndef PINCH_ZOOM_NATIVE_TEST
-bool initialize(bool supportedBuild = true) {
+bool initialize() {
     // Windows may start this executable only to relay Win-plus to its existing
     // UI. Such a process must not install hooks or reset the owner's mapping.
     if (!findNativeUi() && findNativeUi(true)) return false;
@@ -5212,44 +5265,34 @@ bool initialize(bool supportedBuild = true) {
         symbolUnsupported = true;
         InterlockedExchange(&mapping.get()->nativeCaps, 0);
         InterlockedExchange(&mapping.get()->startAtNormal, 0);
+        InterlockedExchange(&mapping.get()->resolverModeNative, 0);
         InterlockedExchange(&mapping.get()->resolverReasonNative, ERROR_NOT_SUPPORTED);
         InterlockedExchange(&mapping.get()->nativeError, ERROR_NOT_SUPPORTED);
         return false; // No hook was attempted: native Windows remains untouched.
     };
-    if (!supportedBuild) return unsupported();
-    void* targets[12]{};
     const HMODULE module = GetModuleHandleW(nullptr);
+    constexpr const wchar_t* names[]{
+        L"?ChangeMagnificationFactor@FullscreenMagnifier@@AEAAXMPEAVCPoint@@@Z",
+        L"?SetOption@OptionsKeeper@@QEAAXW4OPTIONNAME@@J_N@Z",
+        L"?GetOption@OptionsKeeper@@QEBAJW4OPTIONNAME@@@Z",
+        L"?GetOptionsKeeper@OptionsKeeper@@SAJPEAPEAV1@@Z",
+        L"?Run@MagnifierUI@@UEAAXXZ",
+        L"?HandleSetZoomLevel@MagnifierUI@@AEAAXJ@Z",
+        L"?HandleZoomCommand@MagnifierUI@@UEAAXH@Z",
+        L"?MoveMouse@Magnifier@@IEAAXVCPoint@@@Z",
+        L"?MoveTo@FullscreenMagnifier@@AEAAXVCRect@@_N@Z",
+        L"?HandleMouseWheelZoom@MagnifierUI@@AEAAXH@Z",
+    };
+    void* targets[12]{};
     const bool profiled = binary_profiles::resolve(module, binary_profiles::Kind::Magnifier, targets, std::size(targets));
     if (!profiled) {
-        WH_FIND_SYMBOL symbol{};
-        const HANDLE search = Wh_FindFirstSymbol(GetModuleHandleW(nullptr), nullptr, &symbol);
-        if (!search) return unsupported();
-        do {
-            if (wcsstr(symbol.symbol, L"FullscreenMagnifier::ChangeMagnificationFactor(float,class CPoint")) targets[0] = symbol.address;
-            if (wcsstr(symbol.symbol, L"OptionsKeeper::SetOption(") && wcsstr(symbol.symbol, L"long,bool")) targets[1] = symbol.address;
-            if (wcsstr(symbol.symbol, L"OptionsKeeper::GetOption(")) targets[2] = symbol.address;
-            if (wcsstr(symbol.symbol, L"OptionsKeeper::GetOptionsKeeper(")) targets[3] = symbol.address;
-            if (wcsstr(symbol.symbol, L"MagnifierUI::Run(")) targets[4] = symbol.address;
-            if (wcsstr(symbol.symbol, L"MagnifierUI::HandleSetZoomLevel(")) targets[5] = symbol.address;
-            if (wcsstr(symbol.symbol, L"MagnifierUI::HandleZoomCommand(")) targets[6] = symbol.address;
-            if (wcsstr(symbol.symbol, L" Magnifier::MoveMouse(")) targets[7] = symbol.address;
-            if (wcsstr(symbol.symbol, L"FullscreenMagnifier::MoveTo(")) targets[8] = symbol.address;
-            if (wcsstr(symbol.symbol, L"MagnifierUI::HandleMouseWheelZoom(")) targets[9] = symbol.address;
-            if (wcsstr(symbol.symbol, L"MagnifierUI::s_WindowProc(")) targets[10] = symbol.address;
-            if (wcsstr(symbol.symbol, L"FullscreenMagnifier::StaticWndProc(")) targets[11] = symbol.address;
-            if (std::all_of(std::begin(targets), std::end(targets), [](void* target) { return target != nullptr; })) break;
-        } while (Wh_FindNextSymbol(search, &symbol));
-        Wh_FindCloseSymbol(search);
+        // Static WndProc names do not prove the window data layout.
+        void* symbols[std::size(names)]{};
+        if (!binary_profiles::canUseSymbols() || !binary_profiles::resolveSymbols(module, names, symbols))
+            return unsupported();
+        std::copy(std::begin(symbols), std::end(symbols), std::begin(targets));
     }
-    // USERDATA-to-object recovery is verified only for exact image profiles.
-    // A changed binary may still expose the same static WndProc names with a
-    // different storage layout. Capture self from native Run/commands instead.
-    if (!profiled) { targets[10] = nullptr; targets[11] = nullptr; }
     InterlockedExchange(&mapping.get()->resolverModeNative, profiled ? 1 : 2);
-    for (auto& target : targets) if (target) {
-        const auto offset = reinterpret_cast<ULONG_PTR>(target) - reinterpret_cast<ULONG_PTR>(module);
-        if (offset > MAXDWORD || !binary_profiles::permitted(module, static_cast<DWORD>(offset), false)) target = nullptr;
-    }
     std::uint32_t found = 0;
     for (unsigned i = 0; i < std::size(targets); ++i) if (targets[i]) found |= compatibility::symbol(i);
     const auto plan = compatibility::nativePlan(found);
@@ -5273,8 +5316,9 @@ bool initialize(bool supportedBuild = true) {
     // actual hook failure is fatal, so Windhawk rolls back this initialization.
     const bool installed =
         Wh_SetFunctionHook(targets[5], reinterpret_cast<void*>(uiLevel), reinterpret_cast<void**>(&setLevel)) &&
-        Wh_SetFunctionHook(targets[7], reinterpret_cast<void*>(moveMouse), reinterpret_cast<void**>(&originalMoveMouse)) &&
-        Wh_SetFunctionHook(reinterpret_cast<void*>(ClipCursor), reinterpret_cast<void*>(clipCursor), reinterpret_cast<void**>(&originalClipCursor)) &&
+        (!(plan.capabilities & compatibility::NativePointerGuard) ||
+            (Wh_SetFunctionHook(targets[7], reinterpret_cast<void*>(moveMouse), reinterpret_cast<void**>(&originalMoveMouse)) &&
+             Wh_SetFunctionHook(reinterpret_cast<void*>(ClipCursor), reinterpret_cast<void*>(clipCursor), reinterpret_cast<void**>(&originalClipCursor)))) &&
         Wh_SetFunctionHook(targets[0], reinterpret_cast<void*>(change), reinterpret_cast<void**>(&originalChange)) &&
         Wh_SetFunctionHook(targets[1], reinterpret_cast<void*>(option), reinterpret_cast<void**>(&originalOption)) &&
         Wh_SetFunctionHook(targets[2], reinterpret_cast<void*>(readOption), reinterpret_cast<void**>(&getOption)) &&
@@ -5586,46 +5630,27 @@ bool initialize() {
         InterlockedExchange(&mapping.get()->gateReady, 0);
         InterlockedExchange(&mapping.get()->gateCaps, 0);
         InterlockedExchange(&mapping.get()->resolverModeGate, 0);
+        InterlockedExchange(&mapping.get()->resolverModeDesktop, 0);
         InterlockedExchange(&mapping.get()->resolverReasonGate, ERROR_NOT_SUPPORTED);
         return false;
     };
-    using GetVersion = LONG(WINAPI*)(OSVERSIONINFOW*);
-    const auto getVersion = reinterpret_cast<GetVersion>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
-    OSVERSIONINFOW version{};
-    version.dwOSVersionInfoSize = sizeof(version);
-    if (!getVersion || getVersion(&version) != 0 || version.dwBuildNumber != 26200) {
-        Wh_Log(L"Native gate currently supports Windows build 26200 only; public host remains available.");
-        return unsupported();
-    }
     shellModule = LoadLibraryExW(L"twinui.pcshell.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    // Keep our own reference until Windhawk removes hooks into this component.
+    // Retain this module until Windhawk removes the hooks.
     const HMODULE module = shellModule;
     if (!module) { Wh_Log(L"Could not load System32 twinui.pcshell.dll: %lu", GetLastError()); return unsupported(); }
-    const wchar_t* names[] = {
-        L"MultitaskingViewGestureHandler::StartSwipe(",
-        L"MultitaskingViewGestureHandler::ContinueSwipe(",
-        L"MultitaskingViewGestureHandler::FinishSwipe(",
-        L"MultitaskingViewGestureHandler::CancelSwipe(",
-        L"MultitaskingViewVisibilityService::ViewShown(",
-        L"MultitaskingViewVisibilityService::ViewDismissed("};
-    void* targets[6]{};
+    constexpr const wchar_t* names[]{
+        L"?StartSwipe@MultitaskingViewGestureHandler@@UEAAJHHIUTOUCHPAD_GESTURE_CONTEXT@@@Z",
+        L"?ContinueSwipe@MultitaskingViewGestureHandler@@UEAAJHHHHI@Z",
+        L"?FinishSwipe@MultitaskingViewGestureHandler@@UEAAJHHHHI@Z",
+        L"?CancelSwipe@MultitaskingViewGestureHandler@@UEAAJXZ",
+        L"?ViewShown@MultitaskingViewVisibilityService@@UEAAXW4MULTITASKING_VIEW_TYPES@@@Z",
+        L"?ViewDismissed@MultitaskingViewVisibilityService@@UEAAXW4MULTITASKING_VIEW_TYPES@@@Z",
+    };
+    void* targets[std::size(names)]{};
     const bool profiled = binary_profiles::resolve(module, binary_profiles::Kind::Shell, targets, std::size(targets));
-    WH_FIND_SYMBOL symbol{};
-    if (!profiled) {
-        const HANDLE search = Wh_FindFirstSymbol(module, nullptr, &symbol);
-        if (!search) return unsupported();
-        do {
-            for (int i = 0; i < 6; ++i) {
-                if (std::wcsstr(symbol.symbol, names[i])) targets[i] = symbol.address;
-            }
-        } while (Wh_FindNextSymbol(search, &symbol));
-        Wh_FindCloseSymbol(search);
-    }
+    if (!profiled && (!binary_profiles::canUseSymbols() || !binary_profiles::resolveSymbols(module, names, targets)))
+        return unsupported();
     InterlockedExchange(&mapping.get()->resolverModeGate, profiled ? 1 : 2);
-    for (auto& target : targets) if (target) {
-        const auto offset = reinterpret_cast<ULONG_PTR>(target) - reinterpret_cast<ULONG_PTR>(module);
-        if (offset > MAXDWORD || !binary_profiles::permitted(module, static_cast<DWORD>(offset), false)) target = nullptr;
-    }
     std::uint32_t found = 0;
     for (unsigned i = 0; i < std::size(targets); ++i) if (targets[i]) found |= compatibility::symbol(i);
     // All four gesture entrypoints are required before registering any hook.
@@ -5636,19 +5661,10 @@ bool initialize() {
     const HMODULE explorerModule = GetModuleHandleW(nullptr);
     void* desktop[1]{};
     const bool desktopProfiled = binary_profiles::resolve(explorerModule, binary_profiles::Kind::Desktop, desktop, 1);
-    if (desktopProfiled) bridge::desktopRaised = static_cast<volatile LONG*>(desktop[0]);
-    else {
-        const HANDLE explorerSymbols = Wh_FindFirstSymbol(GetModuleHandleW(nullptr), nullptr, &symbol);
-        if (explorerSymbols) {
-            do {
-                if (std::wcsstr(symbol.symbol, L"g_fDesktopRaised")) { bridge::desktopRaised = static_cast<volatile LONG*>(symbol.address); break; }
-            } while (Wh_FindNextSymbol(explorerSymbols, &symbol));
-            Wh_FindCloseSymbol(explorerSymbols);
-        }
-        if (bridge::desktopRaised) {
-            const auto offset = reinterpret_cast<ULONG_PTR>(bridge::desktopRaised) - reinterpret_cast<ULONG_PTR>(explorerModule);
-            if (offset > MAXDWORD || !binary_profiles::permitted(explorerModule, static_cast<DWORD>(offset), true)) bridge::desktopRaised = nullptr;
-        }
+    constexpr const wchar_t* desktopNames[]{L"?g_fDesktopRaised@@3HA"};
+    if (desktopProfiled ||
+        (binary_profiles::canUseSymbols() && binary_profiles::resolveSymbols(explorerModule, desktopNames, desktop, true))) {
+        bridge::desktopRaised = static_cast<volatile LONG*>(desktop[0]);
     }
     InterlockedExchange(&mapping.get()->resolverModeDesktop, bridge::desktopRaised ? (desktopProfiled ? 1 : 2) : 0);
     const auto plan = compatibility::gatePlan(found, bridge::desktopRaised != nullptr);
@@ -5810,124 +5826,6 @@ void start() {
 
 // Native popup menus. UxTheme ordinals are private and must match the offline
 // profile on Windows builds for which their entry points have been verified.
-namespace dark_menus {
-
-enum class AppMode : int { Default, AllowDark, ForceDark, ForceLight };
-using SetPreferredAppMode = AppMode(WINAPI*)(AppMode);
-using FlushMenuThemes = void(WINAPI*)();
-constexpr binary_profiles::Identity uxThemeIdentity{{
-    0xdf, 0x08, 0xce, 0xf3, 0x7e, 0x66, 0x88, 0xf1, 0x9a, 0x17, 0x30, 0x53, 0x6c, 0x35, 0x74, 0xd4},
-    1, 0xa7000, 0xdb08095c};
-
-std::atomic<bool> enabled{false};
-std::mutex themeMutex;
-HMODULE uxTheme = nullptr;
-SetPreferredAppMode setAppMode = nullptr;
-FlushMenuThemes flushMenus = nullptr;
-std::optional<AppMode> savedMode;
-decltype(&TrackPopupMenu) originalPopup = nullptr;
-decltype(&TrackPopupMenuEx) originalPopupEx = nullptr;
-
-bool supportedHost(const wchar_t* image) {
-    if (!image) return false;
-    wchar_t windows[MAX_PATH];
-    const auto count = GetSystemWindowsDirectoryW(windows, ARRAYSIZE(windows));
-    if (!count || count >= ARRAYSIZE(windows)) return false;
-    const std::wstring directory(windows, count);
-    return _wcsicmp(image, (directory + L"\\explorer.exe").c_str()) == 0 ||
-           _wcsicmp(image, (directory + L"\\regedit.exe").c_str()) == 0 ||
-           _wcsicmp(image, (directory + L"\\System32\\mmc.exe").c_str()) == 0;
-}
-
-bool systemDark() {
-    HIGHCONTRASTW contrast{};
-    contrast.cbSize = sizeof(contrast);
-    if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) ||
-        (contrast.dwFlags & HCF_HIGHCONTRASTON))
-        return false;
-    DWORD light = 1, size = sizeof(light);
-    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                        L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size) == ERROR_SUCCESS &&
-           size == sizeof(light) && light == 0;
-}
-
-void applyLocked(bool dark) {
-    if (!setAppMode || !flushMenus || dark == savedMode.has_value()) return;
-    if (dark) {
-        savedMode = setAppMode(AppMode::AllowDark);
-    } else {
-        setAppMode(*savedMode);
-        savedMode.reset();
-    }
-    flushMenus();
-}
-
-void sync() {
-    const std::unique_lock lock(themeMutex, std::try_to_lock);
-    if (lock && setAppMode) applyLocked(enabled.load(std::memory_order_acquire) && systemDark());
-}
-
-void setEnabled(bool enabledInSettings) {
-    enabled.store(enabledInSettings, std::memory_order_release);
-    sync();
-}
-
-BOOL WINAPI popup(HMENU menu, UINT flags, int x, int y, int reserved, HWND owner, const RECT* rect) {
-    if (enabled.load(std::memory_order_acquire)) sync();
-    [[clang::musttail]] return originalPopup(menu, flags, x, y, reserved, owner, rect);
-}
-
-BOOL WINAPI popupEx(HMENU menu, UINT flags, int x, int y, HWND owner, LPTPMPARAMS params) {
-    if (enabled.load(std::memory_order_acquire)) sync();
-    [[clang::musttail]] return originalPopupEx(menu, flags, x, y, owner, params);
-}
-
-FARPROC matchOrdinal(HMODULE module, WORD ordinal, DWORD rva) {
-    const FARPROC address = GetProcAddress(module, MAKEINTRESOURCEA(ordinal));
-    return reinterpret_cast<ULONG_PTR>(address) == reinterpret_cast<ULONG_PTR>(module) + rva &&
-           binary_profiles::permitted(module, rva, false) ? address : nullptr;
-}
-
-bool initialize(const wchar_t* image) {
-    if (!supportedHost(image)) return false;
-    const HMODULE module = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!module) return false;
-    if (binary_profiles::identify(module) != uxThemeIdentity) {
-        FreeLibrary(module);
-        return false;
-    }
-    const auto preferred = reinterpret_cast<SetPreferredAppMode>(matchOrdinal(module, 135, 0x48700));
-    const auto flush = reinterpret_cast<FlushMenuThemes>(matchOrdinal(module, 136, 0x4b420));
-    if (!preferred || !flush) {
-        FreeLibrary(module);
-        return false;
-    }
-
-    const bool exHook = Wh_SetFunctionHook(reinterpret_cast<void*>(TrackPopupMenuEx), reinterpret_cast<void*>(popupEx),
-                                          reinterpret_cast<void**>(&originalPopupEx)) != FALSE;
-    const bool basicHook = Wh_SetFunctionHook(reinterpret_cast<void*>(TrackPopupMenu), reinterpret_cast<void*>(popup),
-                                             reinterpret_cast<void**>(&originalPopup)) != FALSE;
-    if (!exHook && !basicHook) {
-        FreeLibrary(module);
-        return false;
-    }
-    uxTheme = module;
-    setAppMode = preferred;
-    flushMenus = flush;
-    return true;
-}
-
-void stop() {
-    enabled.store(false, std::memory_order_release);
-    const std::lock_guard lock(themeMutex);
-    applyLocked(false);
-    setAppMode = nullptr;
-    flushMenus = nullptr;
-    if (const HMODULE module = std::exchange(uxTheme, nullptr)) FreeLibrary(module);
-}
-
-} // namespace dark_menus
-
 namespace legacy_dialogs {
 enum class Host { Other, Explorer, Control, Management, Registry };
 Host currentHost = Host::Other;
@@ -6069,8 +5967,20 @@ BOOL CALLBACK refreshWindow(HWND window, LPARAM flags) {
     return TRUE;
 }
 
+bool systemDark() {
+    HIGHCONTRASTW contrast{};
+    contrast.cbSize = sizeof(contrast);
+    if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) ||
+        (contrast.dwFlags & HCF_HIGHCONTRASTON))
+        return false;
+    DWORD light = 1, size = sizeof(light);
+    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                        L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size) == ERROR_SUCCESS &&
+           size == sizeof(light) && light == 0;
+}
+
 void refreshTheme() {
-    const bool useDark = enabled.load(std::memory_order_relaxed) && dark_menus::systemDark();
+    const bool useDark = enabled.load(std::memory_order_relaxed) && systemDark();
     const bool previous = dark.exchange(useDark, std::memory_order_relaxed);
     if (previous == useDark) return;
     if (themeLibrary) EnumWindows(refreshWindow, static_cast<LPARAM>(useDark));
@@ -6191,13 +6101,10 @@ bool darkThemeSelected() {
     return Wh_GetIntSetting(L"darkLegacyWindows") != 0;
 }
 void updateLegacyTheme() {
-    const bool setting = darkThemeSelected();
-    dark_menus::setEnabled(setting);
-    legacy_dialogs::setEnabled(setting);
+    legacy_dialogs::setEnabled(darkThemeSelected());
 }
 void stopLegacyTheme() {
     legacy_dialogs::stop();
-    dark_menus::stop();
 }
 
 BOOL Wh_ModInit() {
@@ -6209,12 +6116,7 @@ BOOL Wh_ModInit() {
     const wchar_t* const separator = wcsrchr(path, L'\\');
     const wchar_t* const leaf = separator ? separator + 1 : path;
     if (_wcsicmp(leaf, L"magnify.exe") == 0) {
-        using GetVersion = LONG(WINAPI*)(OSVERSIONINFOW*);
-        const auto getVersion = reinterpret_cast<GetVersion>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
-        OSVERSIONINFOW version{};
-        version.dwOSVersionInfoSize = sizeof(version);
-        const bool supportedBuild = getVersion && getVersion(&version) == 0 && version.dwBuildNumber == 26200;
-        if (magnifier::initialize(supportedBuild)) return TRUE;
+        if (magnifier::initialize()) return TRUE;
         return magnifier::symbolUnsupported && !magnifier::hooksAttempted;
     }
     const auto host = legacy_dialogs::findHost(path, GetCommandLineW());
@@ -6223,10 +6125,8 @@ BOOL Wh_ModInit() {
         dormantThemeHost = true;
         return TRUE;
     }
-    const bool menusAvailable = dark_menus::initialize(path);
-    const bool dialogsAvailable = legacy_dialogs::initialize(host);
-    const bool themeAvailable = menusAvailable || dialogsAvailable;
-    Wh_Log(L"Legacy theme profiles: popup menus=%d, dialogs=%d.", menusAvailable, dialogsAvailable);
+    const bool themeAvailable = legacy_dialogs::initialize(host);
+    Wh_Log(L"Legacy dialog styling available=%d.", themeAvailable);
     if (host != legacy_dialogs::Host::Explorer) return themeAvailable;
 
     // Secondary Explorer processes can theme their own windows while the
