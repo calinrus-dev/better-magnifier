@@ -45,8 +45,8 @@ zooms, its click resets, and the side wheel scrolls vertically. Win+plus/minus
 also works with the numeric keypad. Use WGC to share at normal scale.
 
 The classic Windows theme follows the system apps theme and contrast themes.
-Supported Control Panel views, Windows property dialogs and popup menus
-can use dark surfaces while following the Windows app theme.
+Supported Windows property dialogs, Control Panel applet dialogs and popup
+menus can use dark surfaces while following the Windows app theme.
 Ctrl+Alt+wheel switches windows. The mouse profile is configurable.
 Two-finger app zoom and Windows three/four-finger swipe settings are untouched.
 A Precision Touchpad and Windows build 26200 are required. A companion in
@@ -829,7 +829,6 @@ constexpr bool overviewAllowed(std::uint32_t native, std::uint32_t gate) {
 #include <dwmapi.h>
 #include <hidpi.h>
 #include <shellapi.h>
-#include <shlobj.h>
 #include <objbase.h>
 #include <servprov.h>
 #include <new>
@@ -1436,16 +1435,19 @@ private:
     HWND createOverlay(ReadBand readBand, CreateInBand createInBand) {
         constexpr DWORD ex = WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT |
                              WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP;
+        // WindowFromPoint runs outside this thread for the mouse broker.
+        // Exclude the canvas from hit-testing even in cross-thread queries.
+        constexpr DWORD style = WS_POPUP | WS_DISABLED;
         constexpr DWORD uiAccessBand = 2;
         const auto width = desktop_.right - desktop_.left, height = desktop_.bottom - desktop_.top;
         DWORD band = 0;
         // Use Magnify's existing UIAccess band to stay above desktop windows.
-        auto window = CreateWindowExW(ex, kClassName, L"", WS_POPUP, desktop_.left, desktop_.top, width, height,
+        auto window = CreateWindowExW(ex, kClassName, L"", style, desktop_.left, desktop_.top, width, height,
                                       nullptr, nullptr, module_, this);
         if (window && readBand(window, &band) && band == uiAccessBand) return window;
         if (window) DestroyWindow(window);
         if (!createInBand) return nullptr;
-        window = createInBand(ex, kClassName, L"", WS_POPUP, desktop_.left, desktop_.top, width, height,
+        window = createInBand(ex, kClassName, L"", style, desktop_.left, desktop_.top, width, height,
                               nullptr, nullptr, module_, this, uiAccessBand);
         if (window && readBand(window, &band) && band == uiAccessBand) return window;
         if (window) DestroyWindow(window);
@@ -2109,6 +2111,8 @@ class MouseInputBroker {
     inline static decltype(&SendInput) apiSendInput = SendInput;
     inline static decltype(&keybd_event) apiKeyEvent = keybd_event;
     inline static decltype(&PostMessageW) apiPost = PostMessageW;
+    inline static decltype(&PostThreadMessageW) apiPostThread = PostThreadMessageW;
+    inline static decltype(&GetCursorPos) apiCursor = GetCursorPos;
     inline static decltype(&CallNextHookEx) apiNext = CallNextHookEx;
     inline static decltype(&SetTimer) apiSetTimer = SetTimer;
     inline static decltype(&KillTimer) apiKillTimer = KillTimer;
@@ -2117,6 +2121,8 @@ class MouseInputBroker {
     inline static const auto apiSendInput = SendInput;
     inline static const auto apiKeyEvent = keybd_event;
     inline static const auto apiPost = PostMessageW;
+    inline static const auto apiPostThread = PostThreadMessageW;
+    inline static const auto apiCursor = GetCursorPos;
     inline static const auto apiNext = CallNextHookEx;
     inline static const auto apiSetTimer = SetTimer;
     inline static const auto apiKillTimer = KillTimer;
@@ -2130,11 +2136,14 @@ class MouseInputBroker {
     std::atomic<unsigned> options_{0};
     std::atomic<unsigned> resync_{0}; // Owner thread applies key/button resets before the next physical input.
     std::atomic<bool> installed_{false};
-    std::atomic<bool> plainWheel_{false};
+    std::atomic<unsigned> plainWheel_{0}; // Low bit is the mode, other bits identify its activation.
+    DWORD threadId_ = 0;
     inline static thread_local MouseInputBroker* owner_ = nullptr;
     pinch::WinMenuMask menu_;
     pinch::MouseButtonOwnership buttons_;
     static constexpr ULONG_PTR kMaskTag = 0x424d3037;
+    static constexpr ULONG_PTR kSideScrollTag = 0x42565357;
+    static constexpr UINT kSideScrollMessage = WM_APP + 1; // Private thread message, no HWND.
     static constexpr DWORD kChordTime = 45;
     UINT_PTR chordTimer_ = 0;
     unsigned primaryDown_ = 0, pendingButton_ = 0;
@@ -2182,6 +2191,27 @@ class MouseInputBroker {
         const HWND foreground = GetForegroundWindow();
         const DWORD focused = foreground ? windowIntegrity(foreground, foregroundIntegrity_) : ownIntegrity_;
         return pointer && pointer <= ownIntegrity_ && focused && focused <= ownIntegrity_;
+    }
+    bool sideScrollAvailable(unsigned mode) const {
+        return (mode & 1u) && (options_.load() & 1u) && menu_.mouseUnmodified() && state_->magnifierReady &&
+               state_->nativeViewMode != 1 && state_->nativeViewMode != 3;
+    }
+    void replaySideScroll(int delta, unsigned mode, DWORD queuedAt, DWORD now) {
+        if (now - queuedAt > 100 || plainWheel_.load() != mode || !sideScrollAvailable(mode)) return;
+        POINT point{};
+        if (!apiCursor(&point) || !canReplayAt(point)) return;
+        INPUT input{};
+        input.type = INPUT_MOUSE;
+        input.mi.mouseData = static_cast<DWORD>(std::min(-delta, static_cast<int>(std::numeric_limits<SHORT>::max())));
+        input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+        input.mi.dwExtraInfo = kSideScrollTag;
+        if (apiSendInput(1, &input, sizeof(input)) == 0) {
+            // The original event was consumed only once it was posted. If
+            // vertical insertion fails, try its original horizontal delta.
+            input.mi.mouseData = static_cast<DWORD>(delta);
+            input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
+            apiSendInput(1, &input, sizeof(input));
+        }
     }
     unsigned takePendingButton() {
         if (chordTimer_) apiKillTimer(nullptr, std::exchange(chordTimer_, 0));
@@ -2289,7 +2319,7 @@ class MouseInputBroker {
                 if (down && owner_->chordTimer_) owner_->replayButton();
                 if (event->vkCode == VK_ESCAPE) {
                     if (down && !owner_->escapeDown_ && owner_->menu_.winOnly() && (owner_->options_.load() & 1u)) {
-                        owner_->plainWheel_.store(false);
+                        owner_->setPlainWheel(false);
                         apiPost(owner_->target_, kMouseActionMessage, kExitZoomAction, 0);
                     }
                     owner_->escapeDown_ = down;
@@ -2312,7 +2342,8 @@ class MouseInputBroker {
         auto* broker = owner_;
         if (code != HC_ACTION || !broker) return apiNext(nullptr, code, message, data);
         const auto* event = reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
-        if (event->flags & LLMHF_INJECTED) return apiNext(nullptr, code, message, data);
+        if ((event->flags & LLMHF_INJECTED) || event->dwExtraInfo == kSideScrollTag)
+            return apiNext(nullptr, code, message, data);
         broker->consumeResync();
         const unsigned flags = broker->options_.load();
         if (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP || message == WM_RBUTTONDOWN || message == WM_RBUTTONUP) {
@@ -2326,18 +2357,12 @@ class MouseInputBroker {
             // A drag or another mouse action needs the original button down immediately.
             broker->replayButton();
         }
-        if (message == WM_MOUSEHWHEEL && (flags & 1u) && broker->plainWheel_.load() && broker->menu_.mouseUnmodified() &&
-            broker->state_->magnifierReady && broker->state_->nativeViewMode != 1 && broker->state_->nativeViewMode != 3) {
+        if (message == WM_MOUSEHWHEEL) {
+            const unsigned mode = broker->plainWheel_.load();
             const int delta = static_cast<SHORT>(HIWORD(event->mouseData));
-            if (delta && broker->canReplayAt(event->pt)) {
-                INPUT input{};
-                input.type = INPUT_MOUSE;
-                input.mi.mouseData = static_cast<DWORD>(std::min(-delta, static_cast<int>(std::numeric_limits<SHORT>::max())));
-                input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-                input.mi.time = event->time;
-                input.mi.dwExtraInfo = kMaskTag;
-                if (apiSendInput(1, &input, sizeof(input)) == 1) return 1;
-            }
+            if (delta && broker->sideScrollAvailable(mode) && broker->canReplayAt(event->pt) &&
+                apiPostThread(broker->threadId_, kSideScrollMessage, static_cast<WPARAM>(static_cast<USHORT>(delta)), mode))
+                return 1;
             return apiNext(nullptr, code, message, data);
         }
         const auto forward = [&]() -> LRESULT {
@@ -2356,7 +2381,7 @@ class MouseInputBroker {
             compatibility::mouseZoomAllowed(static_cast<std::uint32_t>(broker->state_->nativeCaps),
                                              broker->state_->resolverReasonNative, broker->state_->nativeError);
         const bool pinching = bridge::pinchDown(*broker->state_);
-        const bool mouseMode = broker->plainWheel_.load() && broker->menu_.mouseUnmodified() &&
+        const bool mouseMode = (broker->plainWheel_.load() & 1u) && broker->menu_.mouseUnmodified() &&
                                zoomUsable && broker->state_->magnifierReady && (flags & 8u);
         if (message == WM_MOUSEWHEEL && (mouseMode ||
             (pinching && !broker->escapeDown_ && zoomUsable && (flags & 8u) && broker->menu_.mouseUnmodified() &&
@@ -2408,6 +2433,7 @@ class MouseInputBroker {
     static DWORD WINAPI run(void* parameter) {
         auto* broker = static_cast<MouseInputBroker*>(parameter);
         owner_ = broker;
+        broker->threadId_ = GetCurrentThreadId();
         const HANDLE stopSignals[]{broker->stop_, broker->controllerStop_};
         const DWORD stopCount = broker->controllerStop_ ? 2 : 1;
         const auto stopping = [&] { return WaitForMultipleObjects(stopCount, stopSignals, FALSE, 0) != WAIT_TIMEOUT; };
@@ -2429,6 +2455,11 @@ class MouseInputBroker {
             for (unsigned processed = 0; processed < 64 && !stopping() &&
                  PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE); ++processed) {
                 if (message.message == WM_QUIT) { running = false; break; }
+                if (!message.hwnd && message.message == kSideScrollMessage) {
+                    if (!stopping()) broker->replaySideScroll(static_cast<SHORT>(message.wParam),
+                        static_cast<unsigned>(message.lParam), message.time, GetTickCount());
+                    continue;
+                }
                 if (!message.hwnd && message.message == WM_TIMER && message.wParam == broker->chordTimer_) {
                     if (!stopping()) broker->replayButton();
                     continue;
@@ -2465,7 +2496,11 @@ public:
     void requestResync(bool clearButtons = false) {
         resync_.fetch_or(clearButtons ? 3u : 1u, std::memory_order_release);
     }
-    void setPlainWheel(bool active) { plainWheel_.store(active); }
+    void setPlainWheel(bool active) {
+        auto previous = plainWheel_.load();
+        while (static_cast<bool>(previous & 1u) != active &&
+               !plainWheel_.compare_exchange_weak(previous, previous + 1u)) {}
+    }
     void stop() {
         options_.store(0);
         if (thread_) {
@@ -5552,8 +5587,11 @@ DWORD WINAPI worker(void* parameter) {
     }
     FreeLibraryAndExitThread(module, 0);
 }
-bool stop() {
+void requestStop() {
     if (stopEvent) SetEvent(stopEvent);
+}
+bool stop() {
+    requestStop();
     if (thread && WaitForSingleObject(thread, 2000) != WAIT_OBJECT_0) {
         // The worker may still own windows, a hook or the shell lease. Keep
         // this version and its state alive until Explorer exits.
@@ -5709,296 +5747,6 @@ void stop() {
 
 } // namespace dark_menus
 
-namespace control_panel_client {
-// Native Control Panel chrome classes identified by WM_NIGHT (MIT).
-// https://github.com/martona/WM_NIGHT/blob/master/src/DuiPaintHook.cpp
-using Microsoft::WRL::ComPtr;
-using PaintBackground = void (*)(void*, HDC, void*, const RECT&, const RECT&, const RECT&, const RECT&);
-using GetColorFromProperty = HRESULT (*)(void*, const void*, int, ULONG*);
-using ClassInfo = void* (*)(void*);
-using ClassName = const wchar_t* (*)(const void*);
-using ValueType = int (*)(const void*);
-using Property = const void* (*)();
-
-constexpr wchar_t kCategoryHome[] = L"::{26EE0668-A00A-44D7-9371-BEB064C98683}";
-constexpr wchar_t kAllItems[] = L"::{21EC2020-3AEA-1069-A2DD-08002B30309D}";
-constexpr wchar_t kNamespaceCache[] = L"BetterVisual.ControlPanel.Namespace";
-constexpr UINT kGetShellBrowser = WM_USER + 7;
-constexpr COLORREF kBackground = RGB(32, 32, 32);
-constexpr COLORREF kText = RGB(240, 240, 240);
-constexpr COLORREF kSecondaryText = RGB(184, 184, 184);
-constexpr COLORREF kLink = RGB(126, 184, 255);
-constexpr binary_profiles::Identity kDirectUiImage{
-    {0x88,0x9a,0x77,0x30,0xcc,0x3f,0x88,0x97,0x69,0x5b,0x1c,0x8e,0xbd,0x6c,0xfb,0xea},
-    1, 0x1aa000, 0x7ec87a97};
-
-PaintBackground originalBackground = nullptr;
-GetColorFromProperty originalPropertyColor = nullptr;
-decltype(&SetTextColor) originalSetTextColor = nullptr;
-decltype(&BeginPaint) originalBeginPaint = nullptr;
-decltype(&EndPaint) originalEndPaint = nullptr;
-ValueType valueType = nullptr;
-const void* foregroundProperty = nullptr;
-HMODULE library = nullptr;
-std::atomic<bool> ready{false};
-std::atomic<bool> dark{false};
-thread_local bool findingNamespace = false;
-
-struct PaintFrame {
-    HWND window;
-    const PAINTSTRUCT* data;
-    HWND controlPanel;
-};
-thread_local std::array<PaintFrame, 16> paintStack{};
-thread_local std::size_t paintDepth = 0;
-thread_local unsigned paintOverflow = 0;
-
-bool classIs(HWND window, const wchar_t* expected) {
-    wchar_t actual[64]{};
-    return GetClassNameW(window, actual, ARRAYSIZE(actual)) && !_wcsicmp(actual, expected);
-}
-
-bool isLegacyFrame(HWND frame) {
-    return frame && classIs(frame, L"CabinetWClass") &&
-        !FindWindowExW(frame, nullptr, L"Microsoft.UI.Content.DesktopChildSiteBridge", nullptr) &&
-        !FindWindowExW(frame, nullptr, L"ShellTabWindowClass", nullptr);
-}
-
-bool isControlPanelPath(const wchar_t* path) {
-    if (!path) return false;
-    if (!_wcsicmp(path, kCategoryHome) || !_wcsicmp(path, kAllItems)) return true;
-    constexpr auto prefixLength = ARRAYSIZE(kCategoryHome) - 1;
-    if (_wcsnicmp(path, kCategoryHome, prefixLength) || path[prefixLength] != L'\\') return false;
-    const wchar_t* category = path + prefixLength + 1;
-    // Shell canonical names for the built-in views. A nested applet, custom
-    // extension, or deprecated category doesn't match this list.
-    return category[0] && !category[1] && std::wcschr(L"012356789", category[0]);
-}
-
-bool readable(const void* address, std::size_t bytes) {
-    MEMORY_BASIC_INFORMATION region{};
-    if (!address || !VirtualQuery(address, &region, sizeof(region)) || region.State != MEM_COMMIT ||
-        (region.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
-        return false;
-    const auto offset = reinterpret_cast<ULONG_PTR>(address) - reinterpret_cast<ULONG_PTR>(region.BaseAddress);
-    return offset <= region.RegionSize && bytes <= region.RegionSize - offset;
-}
-
-std::optional<bool> controlPanelNamespace(HWND frame) {
-    if (findingNamespace) return std::nullopt;
-    struct Lookup {
-        Lookup() { findingNamespace = true; }
-        ~Lookup() { findingNamespace = false; }
-    } lookup;
-    DWORD pid = 0;
-    if (GetWindowThreadProcessId(frame, &pid) != GetCurrentThreadId() || pid != GetCurrentProcessId())
-        return false;
-
-    // Use the already active in-process Shell browser on its own UI thread.
-    // The private message is never sent to another process or an unknown class.
-    auto* browser = reinterpret_cast<IShellBrowser*>(SendMessageW(frame, kGetShellBrowser, 0, 0));
-    if (!readable(browser, sizeof(void*))) return false;
-    auto** const vtable = *reinterpret_cast<void***>(browser);
-    constexpr unsigned queryActiveShellView = 15;
-    if (!readable(vtable, (queryActiveShellView + 1) * sizeof(void*))) return false;
-    HMODULE implementation = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(vtable[queryActiveShellView]), &implementation) ||
-        (implementation != GetModuleHandleW(L"explorerframe.dll") &&
-         implementation != GetModuleHandleW(L"shell32.dll")))
-        return false;
-
-    ComPtr<IShellView> view;
-    ComPtr<IFolderView> folderView;
-    ComPtr<IPersistFolder2> folder;
-    if (FAILED(browser->QueryActiveShellView(&view)) || !view || FAILED(view.As(&folderView)) ||
-        FAILED(folderView->GetFolder(IID_PPV_ARGS(&folder))))
-        return std::nullopt; // The view can still be under construction.
-
-    PIDLIST_ABSOLUTE identity = nullptr;
-    if (FAILED(folder->GetCurFolder(&identity)) || !identity) return std::nullopt;
-    PWSTR path = nullptr;
-    const HRESULT result = SHGetNameFromIDList(identity, SIGDN_DESKTOPABSOLUTEPARSING, &path);
-    CoTaskMemFree(identity);
-    const bool matches = SUCCEEDED(result) && isControlPanelPath(path);
-    CoTaskMemFree(path);
-    return matches;
-}
-
-HWND controlPanelPainter(HWND directUi) {
-    if (!classIs(directUi, L"DirectUIHWND")) return nullptr;
-    const HWND frame = GetAncestor(directUi, GA_ROOT);
-    if (!isLegacyFrame(frame)) return nullptr;
-    const auto cached = reinterpret_cast<ULONG_PTR>(GetPropW(frame, kNamespaceCache));
-    if (cached) return cached == 2 ? directUi : nullptr;
-    const auto matches = controlPanelNamespace(frame);
-    if (matches) SetPropW(frame, kNamespaceCache, reinterpret_cast<HANDLE>(*matches ? 2 : 1));
-    return matches.value_or(false) ? directUi : nullptr;
-}
-
-HWND currentPainter() {
-    if (!dark.load(std::memory_order_relaxed) || paintOverflow || !paintDepth) return nullptr;
-    return paintStack[paintDepth - 1].controlPanel;
-}
-
-bool isScopedPaint(HDC dc) {
-    const HWND panel = currentPainter();
-    if (!dc || !panel) return false;
-    const HWND owner = WindowFromDC(dc);
-    // DirectUI uses an offscreen DC while drawing the panel's child elements.
-    return !owner || owner == panel || IsChild(panel, owner);
-}
-
-HDC WINAPI beginPaint(HWND window, LPPAINTSTRUCT data) {
-    const HWND panel = dark.load(std::memory_order_relaxed) ? controlPanelPainter(window) : nullptr;
-    const HDC dc = originalBeginPaint(window, data);
-    if (dc && (panel || paintDepth)) {
-        if (paintDepth == paintStack.size()) ++paintOverflow;
-        else paintStack[paintDepth++] = {window, data, panel};
-    }
-    return dc;
-}
-
-BOOL WINAPI endPaint(HWND window, const PAINTSTRUCT* data) {
-    if (paintOverflow) --paintOverflow;
-    else if (paintDepth && paintStack[paintDepth - 1].window == window &&
-             paintStack[paintDepth - 1].data == data) --paintDepth;
-    return originalEndPaint(window, data);
-}
-
-COLORREF remapText(COLORREF original) {
-    if ((original >> 24) != 0) return original;
-    const int r = GetRValue(original), g = GetGValue(original), b = GetBValue(original);
-    if (r == g && g == b) {
-        if (r <= 96) return kText;
-        if (r <= 144) return kSecondaryText;
-    }
-    if (b >= 100 && r < 75 && b > g + 25) return kLink;
-    return original;
-}
-
-const wchar_t* elementClass(void* element) {
-    // These DirectUI virtual slots are limited to kDirectUiImage.
-    constexpr unsigned getClassInfoIndex = 35, getNameIndex = 8;
-    auto** elementVtable = *static_cast<void***>(element);
-    if (!elementVtable || !elementVtable[getClassInfoIndex]) return nullptr;
-    const auto getClassInfo = reinterpret_cast<ClassInfo>(elementVtable[getClassInfoIndex]);
-    const auto* info = getClassInfo(element);
-    if (!info) return nullptr;
-    auto* const* infoVtable = *static_cast<void* const* const*>(info);
-    if (!infoVtable || !infoVtable[getNameIndex]) return nullptr;
-    return reinterpret_cast<ClassName>(infoVtable[getNameIndex])(info);
-}
-
-bool replaceChrome(const wchar_t* name, int type) {
-    if (!name) return false;
-    constexpr std::array names{
-        L"HWNDView", L"ControlPanelCategoryModule", L"ControlPanelCategoryModuleInner",
-        L"ControlPanelNavPane", L"ControlPanelNavPaneInner",
-    };
-    for (const auto* candidate : names) {
-        if (!_wcsicmp(name, candidate)) return true;
-    }
-    // Graphic=11 is used for otherwise unnamed background slabs. Interactive
-    // elements and the coloured states of plain Elements still paint natively.
-    return type == 11 && !_wcsicmp(name, L"Element");
-}
-
-void drawBackground(void* element, HDC dc, void* value, const RECT& rect,
-                    const RECT& clip, const RECT& exclude, const RECT& target) {
-    if (element && value && isScopedPaint(dc)) {
-        RECT area{};
-        if (replaceChrome(elementClass(element), valueType(value)) &&
-            IntersectRect(&area, &rect, &clip)) {
-            const auto prior = SetDCBrushColor(dc, kBackground);
-            if (prior != CLR_INVALID) {
-                const bool painted = FillRect(dc, &area, static_cast<HBRUSH>(GetStockObject(DC_BRUSH))) != 0;
-                SetDCBrushColor(dc, prior);
-                if (painted) return;
-            }
-        }
-    }
-    originalBackground(element, dc, value, rect, clip, exclude, target);
-}
-
-COLORREF WINAPI setTextColor(HDC dc, COLORREF color) {
-    return originalSetTextColor(dc, isScopedPaint(dc) ? remapText(color) : color);
-}
-
-HRESULT propertyColor(void* element, const void* property, int index, ULONG* result) {
-    const HRESULT hr = originalPropertyColor(element, property, index, result);
-    if (SUCCEEDED(hr) && result && currentPainter() && property == foregroundProperty) {
-        const ULONG argb = *result;
-        if ((argb >> 24) != 0) {
-            const COLORREF mapped = remapText(RGB((argb >> 16) & 255, (argb >> 8) & 255, argb & 255));
-            *result = (argb & 0xff000000ul) | (GetRValue(mapped) << 16) | (GetGValue(mapped) << 8) | GetBValue(mapped);
-        }
-    }
-    return hr;
-}
-
-bool initialize() {
-    if (library) return ready.load();
-    const auto module = LoadLibraryExW(L"dui70.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!module || binary_profiles::identify(module) != kDirectUiImage) {
-        if (module) FreeLibrary(module);
-        return false;
-    }
-    const auto background = GetProcAddress(module, "?PaintBackground@Element@DirectUI@@QEAAXPEAUHDC__@@PEAVValue@2@AEBUtagRECT@@222@Z");
-    const auto color = GetProcAddress(module, "?GetColorFromProperty@DirectUI@@YAJPEAVElement@1@PEBUPropertyInfo@1@HPEAK@Z");
-    valueType = reinterpret_cast<ValueType>(GetProcAddress(module, "?GetType@Value@DirectUI@@QEBAHXZ"));
-    const auto getForegroundProperty = reinterpret_cast<Property>(GetProcAddress(
-        module, "?ForegroundProp@Element@DirectUI@@SAPEBUPropertyInfo@2@XZ"));
-    if (!background || !color || !valueType || !getForegroundProperty ||
-        !(foregroundProperty = getForegroundProperty())) {
-        FreeLibrary(module);
-        return false;
-    }
-    library = module;
-    ready = Wh_SetFunctionHook(reinterpret_cast<void*>(background), reinterpret_cast<void*>(drawBackground),
-                reinterpret_cast<void**>(&originalBackground)) &&
-            Wh_SetFunctionHook(reinterpret_cast<void*>(color), reinterpret_cast<void*>(propertyColor),
-                reinterpret_cast<void**>(&originalPropertyColor)) &&
-            Wh_SetFunctionHook(reinterpret_cast<void*>(SetTextColor), reinterpret_cast<void*>(setTextColor),
-                reinterpret_cast<void**>(&originalSetTextColor)) &&
-            Wh_SetFunctionHook(reinterpret_cast<void*>(BeginPaint), reinterpret_cast<void*>(beginPaint),
-                reinterpret_cast<void**>(&originalBeginPaint)) &&
-            Wh_SetFunctionHook(reinterpret_cast<void*>(EndPaint), reinterpret_cast<void*>(endPaint),
-                reinterpret_cast<void**>(&originalEndPaint));
-    return ready.load();
-}
-
-void observe(HWND window, UINT message) {
-    if (!ready.load(std::memory_order_relaxed)) return;
-    if (message == WM_NCDESTROY || message == WM_SETTEXT || message == WM_SHOWWINDOW ||
-        message == WM_NCACTIVATE || message == WM_PARENTNOTIFY) {
-        RemovePropW(window, kNamespaceCache);
-    }
-}
-
-BOOL CALLBACK invalidateFrame(HWND window, LPARAM) {
-    DWORD pid = 0;
-    GetWindowThreadProcessId(window, &pid);
-    if (pid == GetCurrentProcessId() && isLegacyFrame(window)) {
-        RemovePropW(window, kNamespaceCache);
-        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
-    }
-    return TRUE;
-}
-
-void setEnabled(bool effectiveDark) {
-    const bool useDark = ready.load(std::memory_order_relaxed) && effectiveDark;
-    if (dark.exchange(useDark) != useDark) EnumWindows(invalidateFrame, 0);
-}
-
-void stop() {
-    setEnabled(false);
-    ready = false;
-    if (const auto module = std::exchange(library, nullptr)) FreeLibrary(module);
-}
-} // namespace control_panel_client
-
 namespace legacy_dialogs {
 enum class Host { Other, Explorer, Control, Management, Registry };
 Host currentHost = Host::Other;
@@ -6144,7 +5892,6 @@ void refreshTheme() {
     const bool useDark = enabled.load(std::memory_order_relaxed) && dark_menus::systemDark();
     const bool previous = dark.exchange(useDark, std::memory_order_relaxed);
     if (previous == useDark) return;
-    control_panel_client::setEnabled(useDark);
     if (themeLibrary) EnumWindows(refreshWindow, static_cast<LPARAM>(useDark));
 }
 
@@ -6184,7 +5931,6 @@ LRESULT WINAPI dialog(HWND window, UINT message, WPARAM w, LPARAM l) {
 LRESULT WINAPI window(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     if ((message == WM_SETTINGCHANGE || message == WM_SYSCOLORCHANGE || message == WM_THEMECHANGED) &&
         GetAncestor(hwnd, GA_ROOT) == hwnd) refreshTheme();
-    if (currentHost == Host::Explorer) control_panel_client::observe(hwnd, message);
     if (dark.load(std::memory_order_relaxed) && (message == WM_SHOWWINDOW || message == WM_NCACTIVATE) &&
         supportedRoot(hwnd)) setTitle(hwnd, true);
     [[clang::musttail]] return originalWindow(hwnd, message, w, l);
@@ -6266,7 +6012,6 @@ void updateLegacyTheme() {
 }
 void stopLegacyTheme() {
     legacy_dialogs::stop();
-    control_panel_client::stop();
     dark_menus::stop();
 }
 
@@ -6291,10 +6036,8 @@ BOOL Wh_ModInit() {
     if (host == legacy_dialogs::Host::Other) return FALSE;
     const bool menusAvailable = dark_menus::initialize(path);
     const bool dialogsAvailable = legacy_dialogs::initialize(host);
-    const bool controlPanelAvailable = host == legacy_dialogs::Host::Explorer && control_panel_client::initialize();
-    const bool themeAvailable = menusAvailable || dialogsAvailable || controlPanelAvailable;
-    Wh_Log(L"Legacy theme profiles: popup menus=%d, dialogs=%d, Control Panel=%d.",
-           menusAvailable, dialogsAvailable, controlPanelAvailable);
+    const bool themeAvailable = menusAvailable || dialogsAvailable;
+    Wh_Log(L"Legacy theme profiles: popup menus=%d, dialogs=%d.", menusAvailable, dialogsAvailable);
     if (host != legacy_dialogs::Host::Explorer) return themeAvailable;
 
     // Secondary Explorer processes can theme their own windows while the
@@ -6339,6 +6082,9 @@ BOOL Wh_ModSettingsChanged(BOOL* reload) {
     updateLegacyTheme();
     if (runZoomController) controller::reloadSettings();
     return TRUE;
+}
+void Wh_ModBeforeUninit() {
+    if (runZoomController) controller::requestStop();
 }
 void Wh_ModUninit() {
     if (magnifier::role) { magnifier::stop(); return; }

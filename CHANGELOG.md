@@ -4,7 +4,8 @@
 
 - Better Magnifier pasa a llamarse **Better Visual**. Las instalaciones locales conservan su identificador y sus ajustes.
 - La rueda conserva el modo activo al volver al 100 %. Un pellizco que vuelve al 100 % lo apaga. Al pasar de rueda a pellizco se descartan los movimientos pendientes y un gesto de ampliación conserva al menos el nivel confirmado por la Lupa.
-- El marco conserva cinco píxeles físicos. Se actualizan los cuatro lados juntos sin mover la ventana transparente durante la animación.
+- El marco conserva cinco píxeles físicos. Se actualizan los cuatro lados juntos y la ventana transparente queda fuera de la detección del puntero.
+- La rueda lateral desplaza verticalmente con el modo activo. El evento convertido sale del hook de entrada y se marca para que no vuelva al zoom.
 - Tema oscuro para interfaces clásicas compatibles de Windows 11. Sigue el modo de aplicaciones de Windows y respeta el alto contraste.
 - Se unifica la ejecución de las pruebas y se conserva la salida detallada con `-Verbose`. El instalador toma los destinos de los metadatos y comprueba la descarga de la DLL anterior antes de cambiarla.
 

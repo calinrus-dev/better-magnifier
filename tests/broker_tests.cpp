@@ -12,10 +12,12 @@ constexpr LRESULT kPassed = 17;
 std::array<bool, 256> keys{};
 struct SendCall { std::vector<INPUT> inputs; };
 struct Posted { HWND target; UINT message; WPARAM w; LPARAM l; };
+struct ThreadPost { UINT message; WPARAM w; LPARAM l; };
 std::vector<SendCall> sends;
 std::vector<UINT> sendResults;
 std::size_t nextSendResult = 0;
 std::vector<Posted> posts;
+std::vector<ThreadPost> threadPosts;
 unsigned passed = 0, keyReads = 0;
 unsigned wheelWakes = 0;
 struct ReleaseMask { BYTE key; BYTE scan; DWORD flags; ULONG_PTR tag; unsigned passedBefore; };
@@ -24,6 +26,7 @@ void WINAPI keyEvent(BYTE key, BYTE scan, DWORD flags, ULONG_PTR tag) {
     releaseMasks.push_back({key, scan, flags, tag, passed});
 }
 bool postSuccess = true;
+bool postThreadSuccess = true;
 bool timerAvailable = true;
 unsigned timers = 0, cancelledTimers = 0;
 UINT_PTR WINAPI setTimer(HWND, UINT_PTR, UINT, TIMERPROC) {
@@ -41,6 +44,12 @@ BOOL WINAPI post(HWND target, UINT message, WPARAM w, LPARAM l) {
     if (message == runtime::kWheelMessage) { ++wheelWakes; return TRUE; }
     posts.push_back({target, message, w, l}); return TRUE;
 }
+BOOL WINAPI postThread(DWORD, UINT message, WPARAM w, LPARAM l) {
+    if (!postThreadSuccess) return FALSE;
+    threadPosts.push_back({message, w, l});
+    return TRUE;
+}
+BOOL WINAPI cursorPosition(LPPOINT point) { *point = {}; return TRUE; }
 LRESULT WINAPI next(HHOOK, int, WPARAM, LPARAM) { ++passed; return kPassed; }
 }
 
@@ -53,12 +62,18 @@ struct InputBrokerTestAccess {
         MouseInputBroker::apiSendInput = sendInput;
         MouseInputBroker::apiKeyEvent = keyEvent;
         MouseInputBroker::apiPost = post;
+        MouseInputBroker::apiPostThread = postThread;
+        MouseInputBroker::apiCursor = cursorPosition;
         MouseInputBroker::apiNext = next;
         MouseInputBroker::apiSetTimer = setTimer;
         MouseInputBroker::apiKillTimer = killTimer;
     }
     static void flushResync(MouseInputBroker& broker) { broker.consumeResync(); }
     static void expireChord(MouseInputBroker& broker) { broker.replayButton(); }
+    static void replaySideScroll(MouseInputBroker& broker, const ThreadPost& posted, DWORD age = 0) {
+        if (posted.message == MouseInputBroker::kSideScrollMessage)
+            broker.replaySideScroll(static_cast<SHORT>(posted.w), static_cast<unsigned>(posted.l), 100, 100 + age);
+    }
     static bool runWithControllerAlreadyStopping(MouseInputBroker& broker) {
         broker.ready_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         broker.stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -79,10 +94,11 @@ struct InputBrokerTestAccess {
         return result;
     }
     static LRESULT mouse(UINT message, int delta = 0, bool injected = false, int code = HC_ACTION,
-                         DWORD time = 100, POINT point = {}) {
+                         DWORD time = 100, POINT point = {}, ULONG_PTR extraInfo = 0) {
         MSLLHOOKSTRUCT event{};
         event.mouseData = static_cast<DWORD>(static_cast<std::uint16_t>(delta)) << 16;
         event.flags = injected ? LLMHF_INJECTED : 0;
+        event.dwExtraInfo = extraInfo;
         event.time = time;
         event.pt = point;
         return MouseInputBroker::mouse(code, message, reinterpret_cast<LPARAM>(&event));
@@ -96,7 +112,8 @@ struct BrokerFixture {
     runtime::MouseInputBroker broker;
     pinch::Config config;
     BrokerFixture() {
-        keys.fill(false); releaseMasks.clear(); sends.clear(); sendResults.clear(); nextSendResult = 0; posts.clear(); passed = 0; postSuccess = true;
+        keys.fill(false); releaseMasks.clear(); sends.clear(); sendResults.clear(); nextSendResult = 0; posts.clear(); threadPosts.clear();
+        passed = 0; postSuccess = postThreadSuccess = true;
         timerAvailable = true; timers = cancelledTimers = wheelWakes = 0;
         record.nativeCaps = compatibility::NativeCore | compatibility::NativeWheel;
         record.magnifierReady = 1; record.nativeViewMode = 2;
@@ -362,21 +379,46 @@ int wmain() {
                 "the side wheel remains horizontal while the mode is off");
         f.broker.setPlainWheel(true);
         for (int delta : {-30, 75}) {
-            require(f.mouse(WM_MOUSEHWHEEL, delta) == 1 && !f.wheel(), "armed side-wheel movement is converted without entering zoom");
-            require(sends.back().inputs.size() == 1, "each horizontal delta generates one vertical mouse event");
+            const auto before = sends.size();
+            require(f.mouse(WM_MOUSEHWHEEL, delta) == 1 && !f.wheel() && sends.size() == before,
+                    "armed side-wheel movement queues conversion outside the native mouse callback");
+            runtime::InputBrokerTestAccess::replaySideScroll(f.broker, threadPosts.back());
+            require(sends.size() == before + 1 && sends.back().inputs.size() == 1,
+                    "each horizontal delta generates one ordinary vertical mouse event");
             const auto& scroll = sends.back().inputs.front();
             require(scroll.type == INPUT_MOUSE && scroll.mi.dwFlags == MOUSEEVENTF_WHEEL && scroll.mi.dwExtraInfo &&
                     static_cast<int>(scroll.mi.mouseData) == -delta,
                     "side wheel matches the configured left-up and right-down mapping");
             require(f.mouse(WM_MOUSEWHEEL, -delta, true) == kPassed && !f.wheel(),
                     "the injected vertical scroll reaches Windows without recursive zoom");
+            require(runtime::InputBrokerTestAccess::mouse(WM_MOUSEWHEEL, -delta, false, HC_ACTION, 100, {}, scroll.mi.dwExtraInfo) ==
+                    kPassed && !f.wheel(), "the side-scroll tag also bypasses zoom when another hook removes the injected flag");
         }
-        sendResults = {0};
-        require(f.mouse(WM_MOUSEHWHEEL, 30) == kPassed && !f.wheel(),
-                "rejected scroll injection falls back to the original horizontal input");
+        postThreadSuccess = false;
+        require(f.mouse(WM_MOUSEHWHEEL, 30) == kPassed && sends.size() == 2,
+                "failure to queue conversion forwards the original physical event");
+        postThreadSuccess = true;
+        sendResults = {0, 1};
+        require(f.mouse(WM_MOUSEHWHEEL, 30) == 1, "queued side scroll owns just one horizontal event");
+        runtime::InputBrokerTestAccess::replaySideScroll(f.broker, threadPosts.back());
+        require(sends.size() == 4 && sends.back().inputs.front().mi.dwFlags == MOUSEEVENTF_HWHEEL &&
+                sends.back().inputs.front().mi.mouseData == 30 && sends.back().inputs.front().mi.dwExtraInfo &&
+                !f.wheel(), "failed vertical insertion falls back to the original tagged horizontal delta");
         f.key(VK_LWIN, true);
-        require(f.mouse(WM_MOUSEHWHEEL, 30) == kPassed && sends.size() == 3,
+        require(f.mouse(WM_MOUSEHWHEEL, 30) == kPassed && sends.size() == 4,
                 "horizontal modifier shortcuts continue to reach Windows");
+    }
+    {
+        BrokerFixture f;
+        f.broker.setPlainWheel(true);
+        require(f.mouse(WM_MOUSEHWHEEL, 30) == 1, "scroll starts in one armed mode activation");
+        f.broker.setPlainWheel(false);
+        f.broker.setPlainWheel(true);
+        runtime::InputBrokerTestAccess::replaySideScroll(f.broker, threadPosts.back());
+        require(sends.empty(), "queued scroll from a previous activation is discarded even after immediate rearming");
+        require(f.mouse(WM_MOUSEHWHEEL, 30) == 1, "the new activation accepts its own horizontal delta");
+        runtime::InputBrokerTestAccess::replaySideScroll(f.broker, threadPosts.back(), 101);
+        require(sends.empty(), "a stale pending side-wheel burst cannot scroll after a message loop stall");
     }
     {
         BrokerFixture f;
