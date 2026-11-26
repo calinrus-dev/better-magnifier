@@ -1,5 +1,12 @@
 # Cambios
 
+## 1.1.0 — 2026-11-26
+
+- El primer cambio de zoom confirma el objetivo tras llegar al renderizador. Un arranque diferido tramita la última petición vigente, incluso si los dedos ya se soltaron.
+- El núcleo, el touchpad, el ratón y el tema oscuro se pueden elegir en Windhawk y con el instalador x64. El marco puede ser rojo, azul o amarillo, y tiene un interruptor independiente.
+- El acorde de los botones izquierdo y derecho tiene su propio interruptor. Los eventos de compatibilidad de lápiz y pantalla táctil pasan directamente a Windows.
+- El zoom nativo requiere Windows 11 x64, compilación 26200. Los ajustes existentes se conservan al actualizar.
+
 ## 1.0.0 — 2026-11-26
 
 - Better Magnifier pasa a llamarse **Better Visual**. Las instalaciones locales conservan su identificador y sus ajustes.

@@ -4,7 +4,7 @@
 // @name:es-ES      Better Visual
 // @description     Smooth desktop zoom and system-aware dark mode for classic Windows interfaces
 // @description:es-ES Zoom fluido del escritorio y tema oscuro para interfaces clásicas de Windows
-// @version         1.0.0
+// @version         1.1.0
 // @author          calinrus-dev
 // @github          https://github.com/calinrus-dev
 // @homepage        https://github.com/calinrus-dev/better-magnifier
@@ -73,9 +73,24 @@ https://github.com/calinrus-dev/better-magnifier
 // ==WindhawkModSettings==
 /*
 - enabled: true
-  $name: Enable desktop zoom
+  $name: Desktop zoom core
+  $name:es-ES: Núcleo de zoom del escritorio
+  $description: Runs the Windows Magnifier integration and keyboard zoom. Touchpad and mouse controls can be selected separately.
+- disableTouchpad: false
+  $name: Disable touchpad controls
+  $name:es-ES: Desactivar controles del touchpad
+  $description: Turns off the three-finger pinch and window switcher using Better Visual. Windows manages touchpad gestures.
+- disableMouse: false
+  $name: Disable mouse controls
+  $name:es-ES: Desactivar controles del ratón
+  $description: Turns off Better Visual's wheel, button and window shortcuts. Touchpad and keyboard zoom remain available.
+- disableMouseChord: false
+  $name: Disable left/right click zoom toggle
+  $name:es-ES: Desactivar acorde de clic izquierdo y derecho
+  $description: Passes ordinary clicks directly to applications while keeping wheel zoom available.
 - darkLegacyWindows: true
   $name: Dark mode for classic Windows interfaces
+  $name:es-ES: Modo oscuro para interfaces clásicas de Windows
   $description: Follows Windows app mode and preserves Windows contrast themes.
 - observeOnly: false
   $name: Observe only (recognition without zoom)
@@ -134,6 +149,21 @@ https://github.com/calinrus-dev/better-magnifier
   $description: Keeps Windows from showing its blue startup indicator when this mod opens Magnifier. Other apps are unaffected.
 - hideMagnifier: true
   $name: Hide Windows Magnifier window and touch controls
+- hideZoomBorder: false
+  $name: Hide the active zoom border
+  $name:es-ES: Ocultar marco del zoom
+  $description: Hides the frame while leaving zoom active.
+- zoomBorderColor: red
+  $name: Active zoom border color
+  $name:es-ES: Color del marco del zoom
+  $options:
+  - red: Red
+  - blue: Blue
+  - yellow: Yellow
+  $options:es-ES:
+  - red: Rojo
+  - blue: Azul
+  - yellow: Amarillo
 - smoothing: 0
   $name: Smoothing time for standalone API mode (milliseconds)
   $description: Native mode uses Windows Magnifier animations.
@@ -277,6 +307,9 @@ struct Config {
     double smoothingMs = 0;
     double fallbackAspect = 0.60;
     bool enabled = true;
+    bool touchpadControls = true;
+    bool mouseControls = true;
+    bool mouseChord = true;
     bool observeOnly = false;
     bool debug = false;
     bool invertPinch = false;
@@ -295,6 +328,10 @@ struct Config {
     int keyboardHoldMultiplier = 2;
     int mouseFollow = 0;  // edges, proportional, fixed
     double edgeMargin = 0.12;
+
+    bool managesZoom() const { return enabled && !observeOnly && keyboardInterop; }
+    bool mouseWheelEnabled() const { return mouseControls && smoothWheel; }
+    bool operator==(const Config&) const = default;
 };
 inline double maximumZoom(int percent) {
     return percent <= 0 ? 4096.0 : std::clamp(percent / 100.0, 1.0, 4096.0);
@@ -1105,13 +1142,15 @@ public:
     }
     void configure(const pinch::Config& config) {
         if (!record_) return;
-        InterlockedExchange(&record_->controlEnabled, config.enabled && !config.observeOnly && config.keyboardInterop ? 1 : 0);
-        InterlockedExchange(&record_->wheelEnabled, config.smoothWheel && config.enabled && !config.observeOnly && config.keyboardInterop ? 1 : 0);
+        const bool zoomEnabled = config.managesZoom();
+        const bool mouseEnabled = config.mouseControls && zoomEnabled;
+        InterlockedExchange(&record_->controlEnabled, zoomEnabled);
+        InterlockedExchange(&record_->wheelEnabled, mouseEnabled && config.smoothWheel);
         InterlockedExchange(&record_->hideUi, config.hideMagnifier ? 1 : 0);
-        InterlockedExchange(&record_->winWheel, config.winWheel ? 1 : 0);
-        InterlockedExchange(&record_->wheelWindowSwitch, config.wheelWindowSwitch ? 1 : 0);
-        InterlockedExchange(&record_->disableReading, config.disableReading ? 1 : 0);
-        InterlockedExchange(&record_->instantSwitch, config.instantHorizontalSwitch && config.enabled && !config.observeOnly ? 1 : 0);
+        InterlockedExchange(&record_->winWheel, mouseEnabled && config.winWheel);
+        InterlockedExchange(&record_->wheelWindowSwitch, mouseEnabled && config.wheelWindowSwitch);
+        InterlockedExchange(&record_->disableReading, mouseEnabled && config.disableReading);
+        InterlockedExchange(&record_->instantSwitch, config.touchpadControls && zoomEnabled && config.instantHorizontalSwitch);
         InterlockedExchange(&record_->normalInOverview, config.normalZoomInOverview ? 1 : 0);
         InterlockedExchange(&record_->keyboardStep, config.keyboardStep);
         InterlockedExchange(&record_->keyboardHoldMultiplier, std::clamp(config.keyboardHoldMultiplier, 1, 4));
@@ -1324,7 +1363,7 @@ public:
     ~SessionLease() { release(); }
 };
 
-// A shared red pixel is stretched by DirectComposition. Its transform stays
+// A shared color pixel is stretched by DirectComposition. Its transform stays
 // fractional when Windows applies fullscreen magnification to the desktop.
 class ZoomBorder {
 public:
@@ -1333,6 +1372,26 @@ public:
         D2D_MATRIX_3X2_F transform{};
     };
     enum class Update : WPARAM { Transform, Display, Device };
+    enum class Color : std::uint8_t { Red, Blue, Yellow };
+    struct Appearance {
+        bool hidden = false;
+        Color color = Color::Red;
+        bool operator==(const Appearance&) const = default;
+    };
+
+    static Color colorFromSetting(const wchar_t* value) {
+        if (value && !_wcsicmp(value, L"blue")) return Color::Blue;
+        if (value && !_wcsicmp(value, L"yellow")) return Color::Yellow;
+        return Color::Red;
+    }
+
+    static constexpr std::array<float, 4> pixelColor(Color color) {
+        switch (color) {
+            case Color::Blue: return {0, 140.0f / 255, 1, 1};
+            case Color::Yellow: return {1, 221.0f / 255, 0, 1};
+            default: return {1, 0, 0, 1};
+        }
+    }
 
 private:
     using CreateInBand = HWND(WINAPI*)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int,
@@ -1357,10 +1416,13 @@ private:
         // Members release objects before unloading the libraries that implement them.
         SystemModule d3d11{L"d3d11.dll"};
         SystemModule dcomp{L"dcomp.dll"};
+        Microsoft::WRL::ComPtr<ID3D11Device> device;
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context;
         Microsoft::WRL::ComPtr<IDCompositionDevice> compositor;
-        Microsoft::WRL::ComPtr<IDCompositionSurface> redPixel;
+        Microsoft::WRL::ComPtr<IDCompositionSurface> pixel;
         Microsoft::WRL::ComPtr<IDCompositionTarget> target;
         Microsoft::WRL::ComPtr<IDCompositionVisual> root;
+        Color color = Color::Red;
     };
     HINSTANCE module_ = nullptr;
     HWND target_ = nullptr;
@@ -1454,7 +1516,25 @@ private:
         return nullptr;
     }
 
-    bool createRedPixel() {
+    static bool paintPixel(Graphics& graphics, Color color) {
+        Microsoft::WRL::ComPtr<IDXGISurface> surface;
+        POINT offset{};
+        if (FAILED(graphics.pixel->BeginDraw(nullptr, IID_PPV_ARGS(&surface), &offset))) return false;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> target;
+        const bool draw = SUCCEEDED(surface.As(&texture)) &&
+                          SUCCEEDED(graphics.device->CreateRenderTargetView(texture.Get(), nullptr, &target));
+        if (draw) {
+            const RECT pixel{offset.x, offset.y, offset.x + 1, offset.y + 1};
+            const auto rgba = pixelColor(color);
+            graphics.context->ClearView(target.Get(), rgba.data(), &pixel, 1);
+        }
+        if (FAILED(graphics.pixel->EndDraw()) || !draw) return false;
+        graphics.color = color;
+        return true;
+    }
+
+    bool createGraphics(Color color) {
         const auto graphics = std::make_shared<Graphics>();
         if (!graphics->d3d11.handle || !graphics->dcomp.handle) return false;
         const auto createD3D = reinterpret_cast<decltype(&D3D11CreateDevice)>(
@@ -1462,42 +1542,28 @@ private:
         const auto createComposition = reinterpret_cast<decltype(&DCompositionCreateDevice)>(
             GetProcAddress(graphics->dcomp.handle, "DCompositionCreateDevice"));
         if (!createD3D || !createComposition) return false;
-        Microsoft::WRL::ComPtr<ID3D11Device> device;
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
-        Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context1;
         Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
-        // Only a single red texel is drawn once. Do not open a vendor device.
+        // Draw one texel at setup and on palette changes using software WARP.
         if (FAILED(createD3D(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                             nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)) ||
-            FAILED(device.As(&dxgi)) || FAILED(context.As(&context1)) ||
+                             nullptr, 0, D3D11_SDK_VERSION, &graphics->device, nullptr, &context)) ||
+            FAILED(graphics->device.As(&dxgi)) || FAILED(context.As(&graphics->context)) ||
             FAILED(createComposition(dxgi.Get(), IID_PPV_ARGS(&graphics->compositor))) ||
             FAILED(graphics->compositor->CreateSurface(1, 1, DXGI_FORMAT_B8G8R8A8_UNORM,
-                                                       DXGI_ALPHA_MODE_PREMULTIPLIED, &graphics->redPixel)))
+                                                       DXGI_ALPHA_MODE_PREMULTIPLIED, &graphics->pixel)))
             return false;
-        Microsoft::WRL::ComPtr<IDXGISurface> surface;
-        POINT offset{};
-        if (FAILED(graphics->redPixel->BeginDraw(nullptr, IID_PPV_ARGS(&surface), &offset))) return false;
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> target;
-        const bool draw = SUCCEEDED(surface.As(&texture)) &&
-                          SUCCEEDED(device->CreateRenderTargetView(texture.Get(), nullptr, &target));
-        if (draw) {
-            constexpr float red[]{1, 0, 0, 1};
-            const RECT pixel{offset.x, offset.y, offset.x + 1, offset.y + 1};
-            context1->ClearView(target.Get(), red, &pixel, 1);
-        }
-        if (FAILED(graphics->redPixel->EndDraw()) || !draw || !target_) return false;
+        if (!paintPixel(*graphics, color) || !target_) return false;
         graphics_ = graphics;
         return true;
     }
 
-    bool build() {
+    bool build(Color color) {
         const HMODULE user = GetModuleHandleW(L"user32.dll");
         if (!user) return false;
         const auto readBand = reinterpret_cast<ReadBand>(GetProcAddress(user, "GetWindowBand"));
         if (!readBand) return false;
         const auto createInBand = reinterpret_cast<CreateInBand>(GetProcAddress(user, "CreateWindowInBand"));
-        if (!registerClass() || (!graphics_ && !createRedPixel())) return false;
+        if (!registerClass() || (!graphics_ && !createGraphics(color))) return false;
         const auto graphics = graphics_;
         const auto frame = frame_;
         overlay_ = createOverlay(readBand, createInBand);
@@ -1511,7 +1577,7 @@ private:
         for (const auto& transform : frame) {
             Microsoft::WRL::ComPtr<IDCompositionVisual> visual;
             if (FAILED(graphics->compositor->CreateVisual(&visual)) ||
-                FAILED(visual->SetContent(graphics->redPixel.Get())) ||
+                FAILED(visual->SetContent(graphics->pixel.Get())) ||
                 FAILED(visual->SetBorderMode(DCOMPOSITION_BORDER_MODE_HARD)) ||
                 FAILED(visual->SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR)) ||
                 FAILED(visual->SetTransform(transform)) ||
@@ -1599,7 +1665,7 @@ public:
         target_ = target;
         topologyMessage_ = topologyMessage;
     }
-    void refresh(bool active, ReadTransform read, Update update = Update::Transform) {
+    void refresh(bool active, ReadTransform read, Update update = Update::Transform, Color color = Color::Red) {
         if (update == Update::Display) displayPosted_ = false;
         if (update == Update::Device) devicePosted_ = false;
         if (!target_ || updating_) return;
@@ -1635,6 +1701,13 @@ public:
         }
         if (update == Update::Display) resetFrame();
         if (!target_) return;
+        if (const auto graphics = graphics_; graphics && graphics->color != color) {
+            if (!paintPixel(*graphics, color) || FAILED(graphics->compositor->Commit())) {
+                if (target_) failed();
+                return;
+            }
+            if (!target_) return;
+        }
         float scale = 1;
         int x = 0, y = 0;
         if (!read || !read(&scale, &x, &y) || !target_ || !std::isfinite(scale) || scale < 1 || scale > 16) return;
@@ -1663,7 +1736,7 @@ public:
             if (!move() && target_) failed();
         } else {
             clearOverlay();
-            if (target_ && !build() && target_) failed();
+            if (target_ && !build(color) && target_) failed();
         }
     }
     void close() {
@@ -2145,6 +2218,7 @@ class MouseInputBroker {
     static constexpr ULONG_PTR kSideScrollTag = 0x42565357;
     static constexpr UINT kSideScrollMessage = WM_APP + 1; // Private thread message, no HWND.
     static constexpr DWORD kChordTime = 45;
+    static constexpr unsigned kMouseChordFlag = 32u;
     UINT_PTR chordTimer_ = 0;
     unsigned primaryDown_ = 0, pendingButton_ = 0;
     bool chordOwned_ = false, escapeDown_ = false;
@@ -2344,10 +2418,15 @@ class MouseInputBroker {
         const auto* event = reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
         if ((event->flags & LLMHF_INJECTED) || event->dwExtraInfo == kSideScrollTag)
             return apiNext(nullptr, code, message, data);
+        // Windows labels the mouse messages produced by a pen or touch screen.
+        constexpr ULONG_PTR tabletSignature = 0xff515700;
+        constexpr ULONG_PTR tabletMask = 0xffffff00;
+        if ((event->dwExtraInfo & tabletMask) == tabletSignature) return apiNext(nullptr, code, message, data);
         broker->consumeResync();
         const unsigned flags = broker->options_.load();
         if (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP || message == WM_RBUTTONDOWN || message == WM_RBUTTONUP) {
-            const bool mayChord = (flags & 9u) == 9u && broker->menu_.idle() &&
+            constexpr unsigned chordRequirements = 9u | kMouseChordFlag;
+            const bool mayChord = (flags & chordRequirements) == chordRequirements && broker->menu_.idle() &&
                 broker->state_->nativeViewMode != 1 && broker->state_->nativeViewMode != 3 &&
                 compatibility::mouseZoomAllowed(static_cast<std::uint32_t>(broker->state_->nativeCaps),
                                                  broker->state_->resolverReasonNative, broker->state_->nativeError);
@@ -2477,19 +2556,24 @@ class MouseInputBroker {
     }
 public:
     bool start(HMODULE module, HWND target, bridge::Record* state, HANDLE controllerStop) {
+        if (thread_) return installed_.load();
         module_ = module; target_ = target; state_ = state; controllerStop_ = controllerStop;
+        requestResync(true);
         ready_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!ready_ || !stop_) { stop(); return false; }
         thread_ = CreateThread(nullptr, 0, run, this, 0, nullptr);
         if (!thread_) { stop(); return false; }
         WaitForSingleObject(ready_, INFINITE);
-        return installed_.load();
+        if (installed_.load()) return true;
+        stop();
+        return false;
     }
     void configure(const pinch::Config& config, bool interactive) {
-        const unsigned next = (interactive && config.enabled && !config.observeOnly && config.keyboardInterop ? 1u : 0u) |
+        const unsigned next = (interactive && config.mouseControls && config.managesZoom() ? 1u : 0u) |
             (config.winWheel ? 2u : 0u) | (config.wheelWindowSwitch ? 4u : 0u) |
-            (config.smoothWheel ? 8u : 0u) | (config.windowButtons ? 16u : 0u);
+            (config.smoothWheel ? 8u : 0u) | (config.windowButtons ? 16u : 0u) |
+            (config.mouseChord ? kMouseChordFlag : 0u);
         const unsigned previous = options_.exchange(next);
         if ((next & 1u) && !(previous & 1u)) requestResync();
     }
@@ -2522,6 +2606,8 @@ class Host {
     pinch::Config (*readSettings_)() = nullptr;
     SessionLease runtimeLease_;
     HINSTANCE windowClassModule_ = nullptr;
+    HANDLE controllerStop_ = nullptr;
+    bool resetHotkeyRegistered_ = false, pauseHotkeyRegistered_ = false;
     std::map<HANDLE, Device> devices_;
     std::vector<BYTE> rawInputBuffer_;
     Zoom zoom_;
@@ -2563,12 +2649,12 @@ class Host {
     struct ModeSuppression { LONG level, commands, sequence; };
     std::optional<ModeSuppression> modeSuppression_;
     bool zoomInputEnabled() const {
-        return sessionActive_ && !paused_ && config_.enabled && !config_.observeOnly && config_.keyboardInterop;
+        return sessionActive_ && !paused_ && config_.managesZoom();
     }
     void publishZoomMode(bool active) {
+        mouseInput_.setPlainWheel(active && config_.mouseWheelEnabled());
         if (active == zoomModePublished_) return;
         zoomModePublished_ = active;
-        mouseInput_.setPlainWheel(active);
         if (auto* state = bridge_.get()) {
             InterlockedExchange(&state->zoomModeActive, active ? 1 : 0);
             bridge_.wake();
@@ -2583,13 +2669,20 @@ class Host {
     }
     void updateZoomMode() {
         auto* state = bridge_.get();
-        if (!state || !zoomInputEnabled() || !config_.smoothWheel || state->nativeViewMode == 1 ||
+        if (!state || !zoomInputEnabled() || state->nativeViewMode == 1 ||
             state->nativeViewMode == 3 || !bridge_.magnifierAvailable()) {
             publishZoomMode(false);
             return;
         }
         const LONG level = state->overviewSavedLevel > 0 ? state->overviewSavedLevel : state->nativeLevel;
         const bool magnified = level > 10000;
+        if (!config_.mouseWheelEnabled()) {
+            zoomModeLatched_ = false;
+            modeSuppression_.reset();
+            previousMagnified_ = magnified;
+            publishZoomMode(magnified);
+            return;
+        }
         const auto source = static_cast<bridge::InputSource>(state->currentSource);
         if (!magnified && previousMagnified_) {
             if (bridge::pendingLevel(*state)) return; // The applied source can lag the level until the native update is acknowledged.
@@ -2609,7 +2702,7 @@ class Host {
                         (bridge::pinchDown(*state) && !pinchReachedNormal_)));
     }
     void toggleZoomMode(std::uint64_t now) {
-        if (!zoomInputEnabled() || !config_.smoothWheel) return;
+        if (!zoomInputEnabled() || !config_.mouseWheelEnabled()) return;
         updateZoomMode();
         if (zoomModePublished_ || zoomModeLatched_) {
             disarmZoomMode();
@@ -2689,7 +2782,7 @@ class Host {
     }
     void wheelInput(int delta, LONG revision, std::uint64_t now) {
         auto* state = bridge_.get();
-        if (!delta || !state || !zoomInputEnabled() || !config_.smoothWheel ||
+        if (!delta || !state || !zoomInputEnabled() || !config_.mouseWheelEnabled() ||
             state->nativeViewMode == 1 || state->nativeViewMode == 3) return;
         if (revision == -1 && bridge_.magnifierAvailable()) return; // Legacy wake-only messages never become zoom.
         if (revision != -1 && revision != state->inputRevision) return;
@@ -2725,7 +2818,7 @@ class Host {
             cancelWheel(false);
             wheelRevision_ = epoch;
         }
-        const bool enabled = zoomInputEnabled() && config_.smoothWheel &&
+        const bool enabled = zoomInputEnabled() && config_.mouseWheelEnabled() &&
                              state.nativeViewMode != 1 && state.nativeViewMode != 3;
         if (!enabled || !state.magnifierReady || (wheel_.active() && now > wheelDeadline_)) {
             wheel_.cancel();
@@ -2824,7 +2917,7 @@ class Host {
             if (deliverInput) renderWheel(*state, now);
             const auto windowPacket = static_cast<std::uint64_t>(InterlockedExchange64(&state->windowWheelPacket, 0));
             const auto windowTime = static_cast<std::uint64_t>(InterlockedCompareExchange64(&state->windowWheelTime, 0, 0));
-            const bool windowInput = !paused_ && sessionActive_ && config_.winWheel && config_.wheelWindowSwitch && config_.enabled && !config_.observeOnly;
+            const bool windowInput = zoomInputEnabled() && config_.mouseControls && config_.winWheel && config_.wheelWindowSwitch;
             if (windowInput && (windowTime >= now || now - windowTime <= 200))
                 windowWheel_.offer(pinch::wheelDelta(windowPacket), now);
             else if (!windowInput) windowWheel_.reset();
@@ -2858,7 +2951,6 @@ class Host {
                     }
                 }
             }
-            mouseInput_.configure(config_, sessionActive_ && !paused_);
             if (deliverInput) applyColdPinch(now);
 
         }
@@ -3005,6 +3097,58 @@ class Host {
         inputRegistered_ = RegisterRawInputDevices(&registration, 1, sizeof(registration)) != FALSE;
         return inputRegistered_;
     }
+    void unregisterTouchpadInput() {
+        if (!inputRegistered_) return;
+        RAWINPUTDEVICE registered{};
+        if (!readTouchpadRegistration(registered)) return;
+        if (registered.hwndTarget == window_) {
+            const RAWINPUTDEVICE removal{kDigitizer, kTouchpad, RIDEV_REMOVE, nullptr};
+            if (!RegisterRawInputDevices(&removal, 1, sizeof(removal))) return;
+        }
+        inputRegistered_ = false;
+    }
+    bool touchpadInputSelected() const {
+        return config_.enabled && config_.touchpadControls && (config_.observeOnly || config_.keyboardInterop);
+    }
+    bool touchpadBackendAvailable() const {
+#ifdef PINCH_ZOOM_STANDALONE
+        return true;
+#else
+        return config_.observeOnly || bridge_.gateAvailable();
+#endif
+    }
+    void syncOptionalInputs() {
+        if (touchpadInputSelected() && touchpadBackendAvailable()) {
+            if (!inputRegistered_ && !registerTouchpadInput())
+                log(L"Touchpad input unavailable; other zoom controls remain available.");
+        } else {
+            unregisterTouchpadInput();
+            devices_.clear();
+            waitForRelease_ = false;
+        }
+
+        mouseInput_.configure(config_, sessionActive_ && !paused_);
+        if (!config_.mouseControls || !config_.managesZoom()) {
+            mouseInput_.stop();
+        } else if (!mouseInput_.start(windowClassModule_, window_, bridge_.get(), controllerStop_)) {
+            log(L"Mouse shortcut hooks unavailable; native keyboard controls remain available.");
+        }
+    }
+    bool syncCoreHotkeys() {
+        if (!config_.enabled) {
+            if (std::exchange(resetHotkeyRegistered_, false)) UnregisterHotKey(window_, kResetHotkey);
+            if (std::exchange(pauseHotkeyRegistered_, false)) UnregisterHotKey(window_, kPauseHotkey);
+            return true;
+        }
+        constexpr UINT modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT;
+        if (!resetHotkeyRegistered_) resetHotkeyRegistered_ = RegisterHotKey(window_, kResetHotkey, modifiers, VK_F10) != FALSE;
+        if (!resetHotkeyRegistered_) {
+            log(L"Emergency reset hotkey unavailable; desktop zoom could not start.");
+            return false;
+        }
+        if (!pauseHotkeyRegistered_) pauseHotkeyRegistered_ = RegisterHotKey(window_, kPauseHotkey, modifiers, VK_F9) != FALSE;
+        return true;
+    }
     Device* device(HANDLE handle) {
         const auto found = devices_.find(handle);
         if (found != devices_.end()) {
@@ -3102,7 +3246,7 @@ class Host {
                 radius += std::pow(contact.point.x - center.x, 2) + std::pow(contact.point.y - center.y, 2);
             radius = std::sqrt(radius / 3);
         }
-        if (paused_ || !sessionActive_ || !config_.enabled || !config_.keyboardInterop) {
+        if (paused_ || !sessionActive_ || !touchpadInputSelected() || !config_.keyboardInterop) {
             bridge_.publish(pinch::Phase::Idle, false, false);
             return;
         }
@@ -3320,7 +3464,7 @@ class Host {
         }
         switch (message) {
             case kMouseActionMessage:
-                if (!host->sessionActive_ || host->paused_ || !host->config_.enabled || host->config_.observeOnly) return 0;
+                if (!host->zoomInputEnabled() || !host->config_.mouseControls) return 0;
                 if (w == 1 || w == kResetArmedZoomAction) {
                     host->resetFromMouse();
                 } else if (w == kToggleZoomAction) {
@@ -3338,10 +3482,12 @@ class Host {
                 host->render(GetTickCount64());
                 return 0;
             case WM_INPUT:
-                host->rawInput(reinterpret_cast<HRAWINPUT>(l));
+                if (host->inputRegistered_ && host->touchpadInputSelected())
+                    host->rawInput(reinterpret_cast<HRAWINPUT>(l));
                 // DefWindowProc is required to clean up foreground WM_INPUT.
                 return DefWindowProcW(window, message, w, l);
             case WM_INPUT_DEVICE_CHANGE:
+                if (!host->inputRegistered_ || !host->touchpadInputSelected()) return 0;
                 host->devices_.erase(reinterpret_cast<HANDLE>(l));
                 host->resetGestures();
                 if (w == GIDC_REMOVAL) host->zoom_.restore();
@@ -3409,18 +3555,23 @@ class Host {
                     host->refreshSession(GetTickCount64(), true);
                 }
                 return TRUE;
-            case kSettingsMessage:
+            case kSettingsMessage: {
                 if (!host->readSettings_) return 0;
+                const auto next = host->readSettings_();
+                if (next == host->config_) return 0;
                 host->zoom_.end();
                 host->restartGestureTracking();
-                host->config_ = host->readSettings_();
+                host->config_ = next;
+                if (!host->syncCoreHotkeys()) host->config_.enabled = false;
                 host->bridge_.configure(host->interactiveConfig());
-                host->mouseInput_.configure(host->config_, host->sessionActive_ && !host->paused_);
+                host->syncOptionalInputs();
                 host->nativeLaunch_.resetAttempts();
                 if (!host->zoomInputEnabled()) host->disarmZoomMode();
+                else host->updateZoomMode();
                 if (!host->config_.enabled || host->config_.observeOnly) host->zoom_.resetToNormal();
                 host->bridge_.syncNative();
                 return 0;
+            }
             case kStopMessage:
             case WM_CLOSE:
                 PostQuitMessage(0);
@@ -3459,29 +3610,16 @@ public:
         window_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClassName, L"Better Visual",
                                   WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, module, this);
         if (!window_) return false;
-#ifdef PINCH_ZOOM_STANDALONE
-        const bool wantTouchpad = true; // Observation remains usable without the native shell gate.
-#else
-        const bool wantTouchpad = config_.observeOnly || bridge_.gateAvailable();
-#endif
-        if (wantTouchpad && !registerTouchpadInput()) log(L"Touchpad input unavailable; mouse wheel and session controller remain active.");
-        if (!wantTouchpad) nativeLaunch_.observe(false, false, true); // Do not auto-open a native fallback after an unsupported shell update.
+        controllerStop_ = controllerStop;
+        if (!touchpadBackendAvailable()) nativeLaunch_.observe(false, false, true);
         // Keep an emergency reset available before allowing any zoom changes.
-        if (!RegisterHotKey(window_, kResetHotkey, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_F10)) {
-            log(L"Emergency reset hotkey unavailable; startup cancelled.");
-            return false;
-        }
-        if (!RegisterHotKey(window_, kPauseHotkey, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_F9)) {
-            log(L"Pause hotkey unavailable; reset hotkey remains available.");
-        }
+        if (!syncCoreHotkeys()) return false;
         if (!SetTimer(window_, kTimer, 16, nullptr)) return false;
         InterlockedExchange64(&bridge_.get()->hostWindow, reinterpret_cast<LONG64>(window_));
         refreshSession(GetTickCount64(), true);
         bridge_.configure(interactiveConfig());
-        mouseInput_.configure(config_, sessionActive_ && !paused_);
-        if (!mouseInput_.start(module, window_, bridge_.get(), controllerStop))
-            log(L"Mouse shortcut hooks unavailable; native keyboard controls remain available.");
-        bridge_.publish(pinch::Phase::Pending, false, sessionActive_ && config_.enabled && !config_.observeOnly);
+        syncOptionalInputs();
+        bridge_.publish(pinch::Phase::Pending, false, inputRegistered_ && zoomInputEnabled());
         lastTick_ = GetTickCount64();
         lastDiagnostic_ = lastTick_;
         UINT count = 0;
@@ -3496,7 +3634,7 @@ public:
                 }
             }
         }
-        log(config_.observeOnly ? L"Ready: observation only; no desktop zoom changes." : L"Ready: three-finger pinch zoom.");
+        log(config_.observeOnly ? L"Ready: observation only." : L"Ready: desktop zoom controller.");
         return true;
     }
     HWND window() const { return window_; }
@@ -3547,16 +3685,12 @@ public:
         if (wheelFrameTimer_) CloseHandle(wheelFrameTimer_);
         if (window_) {
             KillTimer(window_, kTimer);
-            UnregisterHotKey(window_, kResetHotkey);
-            UnregisterHotKey(window_, kPauseHotkey);
+            if (resetHotkeyRegistered_) UnregisterHotKey(window_, kResetHotkey);
+            if (pauseHotkeyRegistered_) UnregisterHotKey(window_, kPauseHotkey);
             if (wtsRegistered_) {
                 WTSUnRegisterSessionNotification(window_);
             }
-            RAWINPUTDEVICE registration{};
-            if (inputRegistered_ && readTouchpadRegistration(registration) && registration.hwndTarget == window_) {
-                RAWINPUTDEVICE removal{kDigitizer, kTouchpad, RIDEV_REMOVE, nullptr};
-                RegisterRawInputDevices(&removal, 1, sizeof(removal));
-            }
+            unregisterTouchpadInput();
             DestroyWindow(window_);
         }
         if (windowClassModule_) UnregisterClassW(kClassName, windowClassModule_);
@@ -3999,6 +4133,11 @@ decltype(&GetMessageTime) keyboardMessageTime = GetMessageTime;
 decltype(&SetTimer) keyboardSetTimer = SetTimer;
 decltype(&KillTimer) keyboardKillTimer = KillTimer;
 decltype(&PostMessageW) keyboardPostMessage = PostMessageW;
+#ifdef PINCH_ZOOM_NATIVE_TEST
+decltype(&PostMessageW) postRecoveredPrime = PostMessageW;
+#else
+const auto postRecoveredPrime = PostMessageW;
+#endif
 void cancelKeyboardHold(bool seal = true);
 bool freezeKeyboardHold();
 void pollKeyboardHold();
@@ -4007,11 +4146,22 @@ constexpr UINT kClaimNativeOwner = WM_APP + 0x62;
 constexpr UINT kRefreshZoomBorder = WM_APP + 0x63;
 constexpr UINT kRefreshNativeVisibility = WM_APP + 0x64;
 runtime::ZoomBorder zoomBorder;
-bool wantsZoomBorder(bridge::Record& state, std::uint64_t now) {
-    if (!state.zoomModeActive || !state.magnifierReady || !state.controlEnabled || !state.hostWindow) return false;
+std::atomic<runtime::ZoomBorder::Appearance> borderAppearance{runtime::ZoomBorder::Appearance{}};
+bool wantsZoomBorder(bridge::Record& state, std::uint64_t now, bool hidden = false) {
+    if (hidden || !state.zoomModeActive || !state.magnifierReady || !state.controlEnabled || !state.hostWindow) return false;
     const auto heartbeat = static_cast<std::uint64_t>(InterlockedCompareExchange64(&state.heartbeat, 0, 0));
     return heartbeat && (heartbeat >= now || now - heartbeat <= 250);
 }
+#ifndef PINCH_ZOOM_NATIVE_TEST
+void refreshBorderSettings() {
+    const auto value = Wh_GetStringSetting(L"zoomBorderColor");
+    const runtime::ZoomBorder::Appearance next{
+        Wh_GetIntSetting(L"hideZoomBorder") != 0, runtime::ZoomBorder::colorFromSetting(value)};
+    if (value) Wh_FreeStringSetting(value);
+    if (borderAppearance.exchange(next) == next) return;
+    if (const HWND target = messageWindow.load()) PostMessageW(target, kRefreshZoomBorder, 0, 0);
+}
+#endif
 LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l);
 DWORD WINAPI worker(void*);
 BOOL CALLBACK visibility(HWND, LPARAM);
@@ -4234,6 +4384,8 @@ void change(void* self, float level, POINT* point) {
         // still perform native mouse tracking without going through this path.
         return;
     }
+    const bool awaitingPrime = observed && !applyingPinch && !nativeCommandDepth && uiPrimeBlocked.load() &&
+                               uiThread.load() == GetCurrentThreadId();
     const bool unobservedCommand = !observed && !applyingPinch && !nativeCommandDepth;
     if (unobservedCommand) cancelKeyboardHold();
     // Without the optional observer preserve the original native fallback.
@@ -4262,9 +4414,11 @@ void change(void* self, float level, POINT* point) {
         nativeObservedTarget = level;
     }
     originalChange(self, level, point); // Native animation retains ownership until managed takeover.
+    auto* state = mapping.get();
+    const bool recoveredPrime = awaitingPrime && !stopping.load() && std::isfinite(level) && level > 1 && level <= 16;
     if (synchronousCommand || unobservedCommand)
-        InterlockedExchange(&mapping.get()->currentSource, static_cast<LONG>(nativeCommandSource));
-    if (!observed || applyingPinch || synchronousCommand) publish(level);
+        InterlockedExchange(&state->currentSource, static_cast<LONG>(nativeCommandSource));
+    if (!observed || applyingPinch || synchronousCommand || recoveredPrime) publish(level);
     rendererGeneration.fetch_add(1);
     if (unobservedCommand && std::abs(level * 10000.0 - before) >= 1) {
         InterlockedExchange(&mapping.get()->appliedSequence, mapping.get()->requestedSequence);
@@ -4272,8 +4426,16 @@ void change(void* self, float level, POINT* point) {
         InterlockedIncrement(&mapping.get()->inputRevision);
         trackingInitialized.store(level > 1);
     }
+    if (recoveredPrime) trackingInitialized.store(true);
     uiPrimeBlocked.store(false);
-    refreshControlReady();
+    const bool ready = refreshControlReady();
+    // A queued request may have coalesced while the native UI was opening.
+    // Resume through the normal mailbox so its current owner and revisions
+    // are checked again on the UI thread before publishing a managed target.
+    if (recoveredPrime && ready && state->controlEnabled && !state->requestWriting &&
+        !state->pendingCommand && bridge::pendingLevel(*state)) {
+        if (const HWND target = messageWindow.load()) postRecoveredPrime(target, updateMessage, 0, 0);
+    }
 }
 long readOption(void* self, int name) {
     if (name == 20 && mapping.get() && mapping.get()->keyboardStep > 0) return mapping.get()->keyboardStep;
@@ -4706,9 +4868,11 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
         } active;
         if (!stopping.load()) {
             auto* state = mapping.get();
+            const auto appearance = borderAppearance.load();
             const auto update = message == kRefreshZoomBorder ? static_cast<runtime::ZoomBorder::Update>(w)
                                                              : runtime::ZoomBorder::Update::Transform;
-            zoomBorder.refresh(state && wantsZoomBorder(*state, GetTickCount64()), readTransform, update);
+            zoomBorder.refresh(state && wantsZoomBorder(*state, GetTickCount64(), appearance.hidden),
+                               readTransform, update, appearance.color);
         }
         return 0;
     }
@@ -4862,22 +5026,24 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
                         refreshNativeVisibility();
                         return 0; // Keep sequence unacknowledged; no NULL call or automatic retry loop.
                     }
-                    trackingInitialized.store(prime && nativeSelf);
-                    if (reset && nativeSelf && rendererGeneration.load() == generationBeforeUi) {
-                        // The UI may only queue this reset. Deliver its actual
-                        // fullscreen target before ACK/lease, otherwise the
-                        // queued change(1) would be rejected as an old echo.
+                    const bool rendererDeferred = nativeSelf && rendererGeneration.load() == generationBeforeUi;
+                    const bool precisePrime = prime && !action && source != bridge::InputSource::Reset &&
+                                              std::abs(delivered - level) >= 0.000001;
+                    if (rendererDeferred || precisePrime) {
+                        // Native UI can queue the renderer callback in either
+                        // direction. Deliver it before accepting the lease,
+                        // which would otherwise filter that same callback.
                         if (stopping.load() || !messageWindow || rendererThread.load() != GetCurrentThreadId()) {
                             InterlockedExchange(&state->nativeError, ERROR_INVALID_THREAD_ID);
                             return 0;
                         }
-                        originalChange(nativeSelf, 1.0f, nullptr);
+                        originalChange(nativeSelf, static_cast<float>(precisePrime ? level : delivered), nullptr);
                     }
-                    if (prime && !action && source != bridge::InputSource::Reset && std::abs(delivered - level) >= 0.000001) {
-                        originalChange(nativeSelf, static_cast<float>(level), nullptr);
+                    if (precisePrime) {
                         originalOption(keeper, 14, static_cast<long>(std::lround(level * 100)), false);
                         delivered = level;
                     }
+                    trackingInitialized.store(prime && nativeSelf);
                 } else {
                     if (!nativeSelf || rendererThread.load() != GetCurrentThreadId()) {
                         InterlockedExchange(&state->nativeError, ERROR_RETRY);
@@ -4985,7 +5151,7 @@ DWORD WINAPI worker(void* stopParameter) {
         const LONG sequence = InterlockedCompareExchange(&state->requestedSequence, 0, 0);
         const LONG command = InterlockedCompareExchange(&state->syncRequest, 0, 0);
         const HWND target = messageWindow.load();
-        const bool border = wantsZoomBorder(*state, GetTickCount64());
+        const bool border = wantsZoomBorder(*state, GetTickCount64(), borderAppearance.load().hidden);
         if (target && (lastBorderTarget != target || lastBorder != border) &&
             PostMessageW(target, kRefreshZoomBorder, FALSE, 0)) {
             lastBorder = border;
@@ -5538,6 +5704,9 @@ pinch::Config latestSettings;
 pinch::Config settings() {
     pinch::Config config;
     config.enabled = Wh_GetIntSetting(L"enabled") != 0;
+    config.touchpadControls = Wh_GetIntSetting(L"disableTouchpad") == 0;
+    config.mouseControls = Wh_GetIntSetting(L"disableMouse") == 0;
+    config.mouseChord = Wh_GetIntSetting(L"disableMouseChord") == 0;
     config.observeOnly = Wh_GetIntSetting(L"observeOnly") != 0;
     config.sensitivity = std::clamp(Wh_GetIntSetting(L"sensitivity"), 25, 500) / 100.0;
     config.acceleration = std::clamp(Wh_GetIntSetting(L"acceleration"), 0, 150) / 100.0;
@@ -5579,6 +5748,7 @@ void reloadSettings() {
     const auto next = settings();
     {
         std::lock_guard lock(settingsMutex);
+        if (latestSettings == next) return;
         latestSettings = next;
     }
     if (const HWND target = window.load()) PostMessageW(target, runtime::kSettingsMessage, 0, 0);
@@ -5589,6 +5759,7 @@ DWORD WINAPI worker(void* parameter) {
         runtime::Host host(currentSettings(), currentSettings);
         if (WaitForSingleObject(stopEvent, 0) == WAIT_TIMEOUT && host.initialize(module, stopEvent)) {
             window.store(host.window());
+            PostMessageW(host.window(), runtime::kSettingsMessage, 0, 0);
             host.loop(stopEvent);
             window.store(nullptr);
         } else if (WaitForSingleObject(stopEvent, 0) == WAIT_TIMEOUT) {
@@ -6014,9 +6185,13 @@ void stop() {
 } // namespace legacy_dialogs
 
 bool runZoomController = false;
+bool dormantThemeHost = false;
 
+bool darkThemeSelected() {
+    return Wh_GetIntSetting(L"darkLegacyWindows") != 0;
+}
 void updateLegacyTheme() {
-    const bool setting = Wh_GetIntSetting(L"darkLegacyWindows") != 0;
+    const bool setting = darkThemeSelected();
     dark_menus::setEnabled(setting);
     legacy_dialogs::setEnabled(setting);
 }
@@ -6044,6 +6219,10 @@ BOOL Wh_ModInit() {
     }
     const auto host = legacy_dialogs::findHost(path, GetCommandLineW());
     if (host == legacy_dialogs::Host::Other) return FALSE;
+    if (host != legacy_dialogs::Host::Explorer && !darkThemeSelected()) {
+        dormantThemeHost = true;
+        return TRUE;
+    }
     const bool menusAvailable = dark_menus::initialize(path);
     const bool dialogsAvailable = legacy_dialogs::initialize(host);
     const bool themeAvailable = menusAvailable || dialogsAvailable;
@@ -6073,7 +6252,11 @@ BOOL Wh_ModInit() {
     return FALSE;
 }
 void Wh_ModAfterInit() {
-    if (magnifier::role) { magnifier::afterInit(); return; }
+    if (magnifier::role) {
+        magnifier::refreshBorderSettings();
+        magnifier::afterInit();
+        return;
+    }
     updateLegacyTheme();
     if (runZoomController) {
         native_gate::ready();
@@ -6087,6 +6270,11 @@ BOOL Wh_ModSettingsChanged(BOOL* reload) {
         if (const HWND target = magnifier::messageWindow.load()) PostMessageW(target, magnifier::kCancelKeyboardHold, 0, 0);
         magnifier::refreshNativeVisibility();
         magnifier::keepPointerStable.store(Wh_GetIntSetting(L"keepPointerStable") != 0);
+        magnifier::refreshBorderSettings();
+        return TRUE;
+    }
+    if (dormantThemeHost) {
+        *reload = darkThemeSelected();
         return TRUE;
     }
     updateLegacyTheme();

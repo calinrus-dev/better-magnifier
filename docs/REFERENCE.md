@@ -1,6 +1,6 @@
 # Referencia de Better Visual
 
-[Inicio](../README.md) · [Descargas](https://github.com/calinrus-dev/better-magnifier/releases/latest) · [Validación](VALIDATION.md)
+[Inicio](../README.md) · [Descargas](https://github.com/calinrus-dev/better-magnifier/releases/tag/v1.1.0) · [Validación](VALIDATION.md)
 
 ## Instalación local y actualización
 
@@ -11,11 +11,28 @@ El paquete compilado utiliza la instalación estándar de Windhawk x64. Conserva
 - **Desactivar.** Usa **Desactivar** en Windhawk o ejecuta el instalador con `-Disable`. Si la Lupa sigue abierta al descargar el mod, recupera sus controles.
 - **Ajustes desde consola.** `-WheelStep 20` aplica el paso del 20 % en una instalación existente. `-Acceleration 35 -MaximumZoom 0` cambia la aceleración del pellizco y usa el límite nativo.
 
+Puedes elegir los componentes desde PowerShell. Por ejemplo, para usar pellizco y teclado con un marco azul:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-local.ps1 -Core On -Touchpad On -Mouse Off -DarkMode Off -BorderColor Blue
+```
+
+`-Core`, `-Touchpad`, `-Mouse`, `-MouseChord`, `-DarkMode` y `-Border` aceptan `On` y `Off`. `-BorderColor` acepta `Red`, `Blue` y `Yellow`. Los ajustes omitidos conservan el valor anterior o toman el predeterminado en una instalación nueva. Para instalar solo el tema oscuro, usa `-Core Off -DarkMode On`.
+
 Windhawk carga el mod en Explorer al iniciar la sesión. La Lupa se prepara en segundo plano al 100 % y puede volver a abrirse con un pellizco, **Win + rueda** o **Win + «+»** tras cerrarla. El reconocimiento de símbolos puede tardar en el primer arranque.
 
 ## Ajustes de Windhawk
 
 Los nombres de los ajustes coinciden con la pestaña **Ajustes** del mod.
+
+### Funciones opcionales
+
+- **Núcleo de zoom del escritorio** gestiona la Lupa en pantalla completa y el zoom de teclado. Los controles del touchpad y el ratón usan este núcleo.
+- **Desactivar controles del touchpad** deja a Windows sus gestos de tres dedos. El núcleo y la rueda siguen disponibles según sus propios ajustes.
+- **Desactivar controles del ratón** deja el ratón con el comportamiento de Windows. El pellizco y el teclado pueden seguir ampliando.
+- **Desactivar acorde de clic izquierdo y derecho** conserva la rueda y deja pasar los clics ordinarios directamente. Con el acorde activo, el primer botón puede esperar hasta 45 ms. Los mensajes de ratón identificados por Windows como lápiz o pantalla táctil se dejan pasar. [Identificación de eventos de lápiz y pantalla táctil](https://learn.microsoft.com/windows/win32/tablet/system-events-and-mouse-messages)
+- **Modo oscuro para interfaces clásicas de Windows** funciona con un ajuste propio, además de los controles de zoom.
+- **Color del marco del zoom** elige rojo, azul o amarillo. **Ocultar marco del zoom** oculta el indicador mientras la ampliación sigue disponible.
 
 ### Pellizco y teclado
 
@@ -30,7 +47,7 @@ Los nombres de los ajustes coinciden con la pestaña **Ajustes** del mod.
 - **Smooth mouse wheel zoom** controla el zoom continuo por rueda. **Wheel zoom per notch (%)** parte de 20 % y admite valores de 1 a 100 %. Una muesca aplica un factor de 1,2 y los deltas fraccionarios cuentan proporcionalmente. Se agrupan por cuadro y se aplica una transición de 32 ms. Si comienza un pellizco, se descarta la rueda pendiente y el gesto de ampliación conserva al menos el último nivel confirmado por la Lupa.
 - **Use Win + mouse wheel for zoom** permite usar **Win + rueda** y **Win + clic central**. Este último vuelve al 100 % y apaga el modo. Desactivar el ajuste cambia el modificador de zoom a **Ctrl + Alt**.
 - **Ctrl+Alt + mouse wheel switches windows** funciona en el perfil Win. Limita su recorrido pendiente a seis pasos y 200 ms. **Extra Ctrl+Alt mouse window actions** está desactivado por defecto. Al activarlo, **Ctrl + Alt + clic central** maximiza o restaura y **Ctrl + Alt + clic derecho** minimiza.
-- El clic izquierdo y derecho simultáneo reconoce hasta 45 ms entre pulsaciones y funciona sin modificadores. En ventanas elevadas, Windows recibe los clics directamente. Con el modo activo, la rueda lateral se convierte en desplazamiento vertical. Al apagarlo, conserva la entrada horizontal.
+- El clic izquierdo y derecho simultáneo funciona sin modificadores. En ventanas elevadas, Windows recibe los clics directamente. Con el modo activo, la rueda lateral se convierte en desplazamiento vertical. Al apagarlo, conserva la entrada horizontal.
 - **Switch windows directly with a horizontal three-finger swipe** cambia una ventana por gesto. Izquierda avanza y derecha retrocede. Desactívalo para usar el selector lateral de Windows. Los deslizamientos arriba y abajo mantienen la acción de Windows.
 - **Show Task View at 100 percent** restaura el nivel y la posición anteriores al salir de la vista de tareas. Una entrada explícita de zoom también restaura la vista anterior. El escritorio sigue siendo ampliable, incluso después de **Win + D**.
 
@@ -67,7 +84,7 @@ La medición predeterminada muestrea cinco segundos de CPU y memoria de los proc
 
 ## Compatibilidad tras actualizaciones de Windows
 
-El lector HID y el filtro de gestos se ejecutan en Explorer. El complemento de Magnify se comunica con ese controlador para aplicar objetivos sobre la Lupa en pantalla completa. La versión probada corresponde a Windows 11 x64 26200.9711, Windhawk 1.7.3 y un Precision Touchpad con contactos HID. Los modos lente y acoplado y el escritorio seguro de UAC quedan fuera del alcance. Consulta la [validación](VALIDATION.md) para combinaciones pendientes, como DPI mixtos y distintos monitores.
+El lector HID y el filtro de gestos se ejecutan en Explorer. El complemento de Magnify se comunica con ese controlador para aplicar objetivos sobre la Lupa en pantalla completa. La integración nativa de zoom requiere Windows 11 x64 en la compilación 26200. La versión probada es 26200.9711 con Windhawk 1.7.3. Para el pellizco se requiere un Precision Touchpad con contactos HID. El tema oscuro tiene su propia comprobación de compatibilidad. Los modos lente y acoplado y el escritorio seguro de UAC quedan fuera del alcance. Consulta la [validación](VALIDATION.md) para combinaciones pendientes, como DPI mixtos y distintos monitores.
 
 Los perfiles locales verifican el GUID y la edad CodeView, el tamaño, el timestamp PE y las secciones de destino. Si cambia la identidad del binario, las compilaciones admitidas prueban símbolos de Microsoft y validan las direcciones por grupos de capacidades. Si falta el filtro del shell, la rueda puede seguir disponible. Si falta el núcleo, se usan la Lupa visible y sus atajos estándar.
 

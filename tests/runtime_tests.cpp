@@ -97,6 +97,7 @@ struct HostTestAccess {
     static bool seedPending(Host& host, HANDLE id) { return host.devices_[id].coldPinchSeed.has_value(); }
     static void activeDevice(Host& host, HANDLE id) { host.activeDevice_ = id; }
     static void restart(Host& host) { host.restartGestureTracking(); }
+    static void configure(Host& host) { host.bridge_.configure(host.interactiveConfig()); }
     static void lock(Host& host) { host.activity_.lock(); host.applySessionState(); }
 };
 }
@@ -106,7 +107,8 @@ namespace {
 struct HostFixture {
     bridge::Record record{};
     runtime::Host host{pinch::Config{}};
-    explicit HostFixture(LONG revision, pinch::View initial = {2, 0, 0}) {
+    explicit HostFixture(LONG revision, pinch::View initial = {2, 0, 0}, const pinch::Config& config = {})
+        : host(config) {
         simulated = initial; cursor = {200, 150};
         record.magnifierPid = static_cast<LONG>(GetCurrentProcessId());
         record.magnifierReady = 1;
@@ -141,6 +143,38 @@ int wmain(int argc, wchar_t** argv) {
         }
         ++checks;
     };
+    {
+        pinch::Config config; config.touchpadControls = false;
+        HostFixture fixture(1, {1, 0, 0}, config);
+        runtime::HostTestAccess::nativeBackend(fixture.host, fixture.record);
+        runtime::HostTestAccess::configure(fixture.host);
+        fixture.record.shellPid = static_cast<LONG>(GetCurrentProcessId());
+        fixture.record.gateReady = 1;
+        runtime::HostTestAccess::frame(fixture.host, pinchDevice, pinchContacts(1), 1000);
+        runtime::HostTestAccess::frame(fixture.host, pinchDevice, pinchContacts(1.1), 1016);
+        require(!fixture.record.down && !fixture.record.enabled && !fixture.record.instantSwitch &&
+                    !fixture.record.requestedSequence && fixture.host.statistics().pinches == 0,
+                "touchpad opt-out leaves three-finger gestures to Windows");
+        runtime::HostTestAccess::input(fixture.host, 120, fixture.record.inputRevision, 1020);
+        require(fixture.record.wheelEnabled && runtime::HostTestAccess::active(fixture.host),
+                "the wheel can drive core zoom with touchpad controls off");
+    }
+    {
+        pinch::Config config; config.mouseControls = false;
+        HostFixture fixture(1, {1, 0, 0}, config);
+        runtime::HostTestAccess::nativeBackend(fixture.host, fixture.record);
+        runtime::HostTestAccess::configure(fixture.host);
+        runtime::HostTestAccess::toggleZoom(fixture.host, 1000);
+        runtime::HostTestAccess::input(fixture.host, 120, fixture.record.inputRevision, 1000);
+        require(fixture.record.controlEnabled && fixture.record.instantSwitch &&
+                    !fixture.record.wheelEnabled && !fixture.record.disableReading &&
+                    !fixture.record.zoomModeActive && !runtime::HostTestAccess::active(fixture.host),
+                "mouse opt-out leaves touchpad and core available without mouse shortcuts");
+        fixture.record.nativeLevel = 14000;
+        runtime::HostTestAccess::tick(fixture.host, 1016);
+        require(fixture.record.zoomModeActive && fixture.record.nativeLevel == 14000,
+                "the border state can mark magnification with mouse controls off");
+    }
     {
         HostFixture fixture(1, {1, 0, 0});
         auto& record = fixture.record;

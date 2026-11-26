@@ -1,6 +1,13 @@
 [CmdletBinding()]
 param(
     [switch]$Disable,
+    [ValidateSet('On','Off')][string]$Core,
+    [ValidateSet('On','Off')][string]$Touchpad,
+    [ValidateSet('On','Off')][string]$Mouse,
+    [ValidateSet('On','Off')][string]$MouseChord,
+    [ValidateSet('On','Off')][string]$DarkMode,
+    [ValidateSet('On','Off')][string]$Border,
+    [ValidateSet('Red','Blue','Yellow')][string]$BorderColor,
     [ValidateRange(1,100)][Nullable[int]]$WheelStep,
     [ValidateRange(0,150)][Nullable[int]]$Acceleration,
     [ValidateRange(0,409600)][Nullable[int]]$MaximumZoom
@@ -152,19 +159,31 @@ try {
         try {
             $defaults = @{enabled=1; observeOnly=0; sensitivity=100; acceleration=35; invertPinch=0; threshold=3;
                 maxZoom=0; suppressStartupFeedback=1; smoothWheel=1; winWheel=1; wheelWindowSwitch=1; windowButtons=0; disableReading=1; wheelStep=20; instantHorizontalSwitch=1; normalZoomInOverview=1; keyboardInterop=1; keyboardStep=0; keyboardHoldMultiplier=2; hideMagnifier=1; keepPointerStable=1; mouseFollow='edges'; edgeMargin=12;
-                smoothing=0; fallbackHeight=60; debugLogging=0; darkLegacyWindows=1}
+                smoothing=0; fallbackHeight=60; debugLogging=0; darkLegacyWindows=1;
+                disableTouchpad=0; disableMouse=0; disableMouseChord=0; hideZoomBorder=0; zoomBorderColor='red'}
             foreach ($name in $defaults.Keys) {
                 if ($null -eq $settings.GetValue($name, $null)) {
                     $kind = if ($defaults[$name] -is [string]) { 'String' } else { 'DWord' }
                     $settings.SetValue($name, $defaults[$name], $kind)
                 }
             }
+            if ($Core) { $settings.SetValue('enabled', [int]($Core -eq 'On'), 'DWord') }
+            if ($Touchpad) { $settings.SetValue('disableTouchpad', [int]($Touchpad -eq 'Off'), 'DWord') }
+            if ($Mouse) { $settings.SetValue('disableMouse', [int]($Mouse -eq 'Off'), 'DWord') }
+            if ($MouseChord) { $settings.SetValue('disableMouseChord', [int]($MouseChord -eq 'Off'), 'DWord') }
+            if ($DarkMode) { $settings.SetValue('darkLegacyWindows', [int]($DarkMode -eq 'On'), 'DWord') }
+            if ($Border) { $settings.SetValue('hideZoomBorder', [int]($Border -eq 'Off'), 'DWord') }
+            if ($BorderColor) { $settings.SetValue('zoomBorderColor', $BorderColor.ToLowerInvariant(), 'String') }
             if ($null -ne $WheelStep) { $settings.SetValue('wheelStep', [int]$WheelStep, 'DWord') }
             if ($null -ne $Acceleration) { $settings.SetValue('acceleration', [int]$Acceleration, 'DWord') }
             if ($null -ne $MaximumZoom) { $settings.SetValue('maxZoom', [int]$MaximumZoom, 'DWord') }
+            $useIntegratedHiding = $settings.GetValue('enabled', 1) -and $settings.GetValue('keyboardInterop', 1) -and
+                $settings.GetValue('hideMagnifier', 1) -and -not $settings.GetValue('observeOnly', 0)
         } finally { $settings.Close() }
-        # Explicitly requested merge: disable the old headless mod, keep it installed.
-        $legacyKey = $machine.OpenSubKey('SOFTWARE\Windhawk\Engine\Mods\magnifier-headless', $true)
+        # The integrated hider and the old headless mod can conflict.
+        if ($useIntegratedHiding) {
+            $legacyKey = $machine.OpenSubKey('SOFTWARE\Windhawk\Engine\Mods\magnifier-headless', $true)
+        }
         if ($legacyKey) {
             $legacyDisabled = $legacyKey.GetValue('Disabled', 0)
             if ($null -eq $key.GetValue('LegacyHeadlessWasDisabled', $null)) { $key.SetValue('LegacyHeadlessWasDisabled', $legacyDisabled, 'DWord') }

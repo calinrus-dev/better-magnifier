@@ -148,6 +148,33 @@ int wmain() {
         ++checks;
     };
     {
+        BrokerFixture f; f.config.mouseControls = false; f.configure();
+        f.broker.setPlainWheel(true);
+        require(f.mouse(WM_LBUTTONDOWN) == kPassed && f.mouse(WM_RBUTTONDOWN) == kPassed &&
+                    f.mouse(WM_MOUSEWHEEL, 120) == kPassed && f.mouse(WM_MOUSEHWHEEL, 120) == kPassed &&
+                    f.mouse(WM_MBUTTONDOWN) == kPassed && !f.wheel() && sends.empty() && posts.empty() && threadPosts.empty(),
+                "a disabled mouse feature passes all mouse events even with the zoom indicator active");
+    }
+    {
+        BrokerFixture f; f.config.mouseChord = false; f.configure();
+        require(f.mouse(WM_LBUTTONDOWN) == kPassed && f.mouse(WM_RBUTTONDOWN) == kPassed &&
+                    f.mouse(WM_LBUTTONUP) == kPassed && f.mouse(WM_RBUTTONUP) == kPassed &&
+                    sends.empty() && posts.empty() && !timers,
+                "disabling the chord avoids buffering or replaying ordinary clicks");
+        f.broker.setPlainWheel(true);
+        require(f.mouse(WM_MOUSEWHEEL, 120) == 1 && f.wheel() == 120,
+                "the main wheel remains available when only the click chord is disabled");
+    }
+    {
+        BrokerFixture f;
+        for (const ULONG_PTR tag : {0xff515703ul, 0xff515780ul}) {
+            require(runtime::InputBrokerTestAccess::mouse(WM_LBUTTONDOWN, 0, false, HC_ACTION, 100, {}, tag) == kPassed &&
+                        runtime::InputBrokerTestAccess::mouse(WM_LBUTTONUP, 0, false, HC_ACTION, 110, {}, tag) == kPassed,
+                    "Windows pen and touch compatibility mouse events reach the original target directly");
+        }
+        require(sends.empty() && posts.empty() && !timers, "pen and touch do not arm a click timer");
+    }
+    {
         BrokerFixture f;
         require(f.key(VK_LWIN, true) == kPassed, "Win down remains native");
         require(f.mouse(WM_MOUSEWHEEL, 1) == 1 && f.wheel() == 1 && f.record.wheelEvents == 1 && wheelWakes == 1,

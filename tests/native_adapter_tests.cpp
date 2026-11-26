@@ -22,6 +22,11 @@ bool nativeReadDefault(const void* self) { ++nativeReadDefaultCalls; readingObje
 int uiCalls = 0, directWrites = 0, persistedWrites = 0, cursorWarps = 0;
 bool simulateReentrantClose = false;
 bool deferUiRenderer = false;
+unsigned primeResumes = 0;
+BOOL WINAPI recordPrimeResume(HWND window, UINT message, WPARAM w, LPARAM l) {
+    if (window == magnifier::messageWindow.load() && message == magnifier::updateMessage && !w && !l) ++primeResumes;
+    return TRUE;
+}
 LRESULT closeResult = 0;
 double lastFloat = 1;
 pinch::View visibleView{};
@@ -151,9 +156,27 @@ int wmain() {
         require(!magnifier::wantsZoomBorder(border, 2000), "inactive mode has no border");
         border.zoomModeActive = 1;
         require(magnifier::wantsZoomBorder(border, 2000), "active mode shows the border regardless of zoom level");
+        require(!magnifier::wantsZoomBorder(border, 2000, true) && border.zoomModeActive,
+                "hiding the frame does not disarm the shared zoom mode");
         require(!magnifier::wantsZoomBorder(border, 2251), "expired host heartbeat removes the border");
         border.magnifierReady = 0;
         require(!magnifier::wantsZoomBorder(border, 2000), "unavailable native magnifier removes the border");
+    }
+    {
+        using Border = runtime::ZoomBorder;
+        const auto defaults = magnifier::borderAppearance.load();
+        require(!defaults.hidden && defaults.color == Border::Color::Red, "existing installations default to a visible red border");
+        require(Border::colorFromSetting(nullptr) == Border::Color::Red &&
+                Border::colorFromSetting(L"") == Border::Color::Red &&
+                Border::colorFromSetting(L"unrecognized") == Border::Color::Red,
+                "missing or unrecognized border colors use the previous red default");
+        require(Border::colorFromSetting(L"BLUE") == Border::Color::Blue &&
+                Border::colorFromSetting(L"yellow") == Border::Color::Yellow,
+                "the Windhawk palette accepts the configured blue and yellow values");
+        require(Border::pixelColor(Border::Color::Red) == std::array{1.0f, 0.0f, 0.0f, 1.0f} &&
+                Border::pixelColor(Border::Color::Blue) == std::array{0.0f, 140.0f / 255, 1.0f, 1.0f} &&
+                Border::pixelColor(Border::Color::Yellow) == std::array{1.0f, 221.0f / 255, 0.0f, 1.0f},
+                "the three choices give the expected vivid opaque colors");
     }
     {
         const auto checkFrame = [&](const RECT& screen, pinch::View view) {
@@ -548,6 +571,45 @@ int wmain() {
         uiCalls = directWrites = persistedWrites = nullRendererWrites = 0;
         lastFloat = 1;
     };
+    prepareCold();
+    state.nativeCaps = compatibility::NativeCore | compatibility::NativeKeyboardObserver;
+    magnifier::nativeSelf.store(reinterpret_cast<void*>(0x2000));
+    magnifier::rendererThread.store(GetCurrentThreadId());
+    deferUiRenderer = true;
+    deliver(12500, 697);
+    require(!state.down && uiCalls == 1 && directWrites == 1 && visibleView.zoom == 1.25 &&
+            state.appliedSequence == 697 && magnifier::trackingInitialized,
+            "a pinch released before a deferred integer prime completes starts tracking and renders before acknowledging");
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.25f, nullptr);
+    require(directWrites == 1 && visibleView.zoom == 1.25,
+            "the redundant stock callback cannot reset the already-installed tracking state");
+    prepareCold();
+    state.nativeCaps = compatibility::NativeCore | compatibility::NativeKeyboardObserver;
+    magnifier::ensureUi(reinterpret_cast<void*>(0x1000));
+    magnifier::postRecoveredPrime = recordPrimeResume;
+    primeResumes = 0;
+    deferUiRenderer = true;
+    deliver(12050, 698);
+    require(!magnifier::nativeSelf && !state.appliedSequence && !primeResumes,
+            "an incomplete bootstrap waits for the authentic renderer instead of polling or acknowledging");
+    deliver(12650, 699); // A newer HID objective can coalesce before the UI accepts the first one.
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.21f, nullptr);
+    require(!state.down && state.nativeLevel == 12100 && state.magnifierReady && magnifier::trackingInitialized && primeResumes == 1,
+            "a genuine deferred renderer callback after finger lift publishes tracking and schedules one completion");
+    magnifier::messages(nullptr, magnifier::updateMessage, 0, 0);
+    require(state.nativeLevel == 12650 && std::abs(visibleView.zoom - 1.265) < 0.00001 && state.appliedSequence == 699 &&
+            state.currentSource == static_cast<LONG>(bridge::InputSource::Pinch) && uiCalls == 1 && primeResumes == 1,
+            "deferred completion preserves the latest exact zoom and does not prime or schedule again");
+    prepareCold();
+    state.nativeCaps = compatibility::NativeCore | compatibility::NativeKeyboardObserver;
+    magnifier::ensureUi(reinterpret_cast<void*>(0x1000));
+    deferUiRenderer = true;
+    deliver(12050, 698);
+    InterlockedIncrement(&state.inputRevision);
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.21f, nullptr);
+    require(state.nativeLevel == 12100 && state.magnifierReady && state.appliedSequence == 0 && primeResumes == 1,
+            "renderer recovery exposes the visible factor without resuming a stale pinch objective");
+    magnifier::postRecoveredPrime = PostMessageW;
     prepareCold();
     state.nativeCaps = compatibility::NativeCore | compatibility::NativeKeyboardObserver;
     magnifier::nativeSelf.store(reinterpret_cast<void*>(0x2000));
