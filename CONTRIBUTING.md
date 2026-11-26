@@ -1,15 +1,34 @@
-# Contribuir
+# Contribuir a Better Visual
 
-El proyecto se distribuye bajo GPL-3.0-or-later. Las correcciones y mejoras se pueden proponer por issue o pull request.
+[Inicio](README.md) · [Referencia](docs/REFERENCE.md) · [Validación](docs/VALIDATION.md)
 
-Incluye la compilación exacta de Windows, la versión de Windhawk, el modelo del touchpad y los pasos para reproducir un fallo. Distingue si ocurre al arrancar la Lupa desde cero, con ella abierta, al usar el teclado o al cambiar de modo. Evita adjuntar información personal o volcados completos del sistema.
+Las correcciones y mejoras se pueden proponer mediante un issue o un pull request. El proyecto usa [GPL-3.0-or-later](LICENSE).
 
-Para problemas con rueda, indica el modelo del ratón, si usas muescas o giro libre, el perfil de atajos y el ajuste del paso de zoom y el sentido de cada rueda. Prueba por separado una muesca, un movimiento pequeño, un giro rápido con frenado y una inversión. No adjuntes capturas de entradas personales.
+## Reproducir un fallo
 
-El mod distribuible debe seguir siendo `mods/kde-pinch-zoom.wh.cpp`, autocontenido. No cambies la configuración de gestos de Windows ni sustituyas deslizamientos nativos por atajos simulados. Los hooks privados requieren confirmar su ABI y acotar las versiones compatibles antes de ampliar soporte.
+- Indica la compilación exacta de Windows, la versión de Windhawk, el dispositivo y los pasos para reproducirlo.
+- Distingue si ocurre al iniciar la Lupa, con ella abierta, al usar el teclado o al cambiar de modo. Añade la salida de `--status` si ayuda a identificar el modo, el nivel y las capacidades activas. Evita adjuntar datos personales o volcados completos del sistema.
+- Para fallos con la rueda, indica el modelo del ratón, si usas muescas o giro libre, el perfil de atajos y el paso de zoom. Prueba una muesca, un movimiento pequeño, un giro rápido con frenado y una inversión. Anota qué rueda y qué sentido provocan el fallo.
 
-Ejecuta `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1`. Este script no instala el mod ni cambia el zoom. La prueba `build/native-integration.exe --live` es optativa y cambia brevemente la ampliación: requiere el mod instalado y restaura su nivel inicial. Documenta por separado pruebas automáticas y gestos físicos.
+## Compilar y comprobar
 
-Al modificar la rueda, conserva la equivalencia entre una muesca y sus deltas fraccionarios, la cancelación al invertir y los límites de recorrido pendiente. Comprueba también la alternancia con teclado y pellizco. Los relays de Magnify no deben publicar ni limpiar el estado del proceso dueño, y los callbacks atrasados no deben deshacer objetivos gestionados. No ejecutes pruebas visibles de zoom durante el trabajo del usuario sin coordinación previa.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
+```
 
-No declares compatible otra versión de Windows, Windhawk, arquitectura o configuración de monitores solo porque compile. El soporte actual está limitado a lo descrito en el README.
+Para Windhawk portátil, añade `-WindhawkPath 'D:\Herramientas\Windhawk'`. El script genera en `build/` la DLL, el host de diagnóstico y los binarios de prueba. Las comprobaciones automáticas usan entradas simuladas en el reconocedor, el broker de ratón y teclado, el runtime y el adaptador nativo. La compilación se puede ejecutar con el escritorio en uso.
+
+La integración visible es optativa y requiere el mod instalado. Comprueba el renderizado nativo, las inversiones rápidas, el incremento por IPC y el relevo con el pellizco. Cambia brevemente el zoom y restaura el nivel inicial. Ejecútala cuando puedas dejar quietos el touchpad, el ratón y el teclado.
+
+```powershell
+.\build\native-integration.exe --live
+```
+
+Documenta las pruebas automáticas y las comprobaciones con hardware físico. Para ampliar la compatibilidad, registra la versión de Windows y Windhawk, la arquitectura y la configuración de monitores con que se comprobó el cambio.
+
+## Cambios de código
+
+- Conserva un solo archivo autocontenido para distribuir en Windhawk, `mods/kde-pinch-zoom.wh.cpp`. Mantén la configuración de gestos de Windows y aplica sus acciones nativas cuando corresponda.
+- Al modificar la rueda, conserva la equivalencia entre una muesca y sus deltas fraccionarios, la cancelación al invertir y los límites de recorrido pendiente. Comprueba el relevo con teclado y pellizco.
+- Los procesos auxiliares de Magnify dejan que la instancia propietaria controle su estado. Los callbacks retrasados respetan el objetivo de zoom vigente.
+- Para ampliar el soporte de hooks privados, comprueba su ABI y acota las versiones compatibles.
