@@ -288,6 +288,25 @@ int wmain(int argc, wchar_t** argv) {
                 "a wheel event after lift continues from the final unacknowledged pinch target");
     }
     {
+        HostFixture fixture(22, {1, 0, 0}); // The classic sensor is at 100% during per-monitor zoom.
+        auto& record = fixture.record;
+        auto& host = fixture.host;
+        record.gateReady = 1;
+        record.shellPid = static_cast<LONG>(GetCurrentProcessId());
+        record.nativeCaps = compatibility::NativeCore | compatibility::NativeUiLevel;
+        record.nativeLevel = 23500;
+        record.currentSource = static_cast<LONG>(bridge::InputSource::Wheel);
+        runtime::HostTestAccess::nativeBackend(host, record);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(1), 1100);
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(0.88), 1116);
+        require(record.requestedSequence == 1 && record.requestedLevel == 23500 &&
+                record.requestSource == static_cast<LONG>(bridge::InputSource::Pinch),
+                "inward pinch takes over the per-monitor wheel level when the classic sensor stays at 100 percent");
+        runtime::HostTestAccess::frame(host, pinchDevice, pinchContacts(0.85), 1120);
+        require(record.requestedSequence == 2 && record.requestedLevel > 10000 && record.requestedLevel < 23500,
+                "the next inward frame gradually reduces the inherited per-monitor zoom");
+    }
+    {
         HostFixture fixture(21, {2, 0, 0});
         auto& record = fixture.record;
         auto& host = fixture.host;

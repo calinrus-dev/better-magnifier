@@ -812,7 +812,8 @@ namespace compatibility {
 enum NativeCapability : std::uint32_t {
     NativeCore = 1, NativeKeyboardObserver = 2, NativeWheel = 4,
     NativeViewportRestore = 8, NativeBootstrapRun = 16,
-    NativeBootstrapWindows = 32, NativeHideUi = 64, NativePointerGuard = 128
+    NativeBootstrapWindows = 32, NativeHideUi = 64, NativePointerGuard = 128,
+    NativeUiLevel = 256
 };
 enum GateCapability : std::uint32_t {
     GateSwipe = 1, GateVisibility = 2, GateDesktop = 4
@@ -854,7 +855,8 @@ constexpr bool mouseZoomAllowed(std::uint32_t capabilities, long reason, long er
     return !nativeDeclined(capabilities, reason) && error != 50; // ERROR_NOT_SUPPORTED, including lens/docked.
 }
 constexpr bool overviewAllowed(std::uint32_t native, std::uint32_t gate) {
-    return (native & NativeViewportRestore) && (native & NativeKeyboardObserver) && (gate & GateVisibility);
+    return !(native & NativeUiLevel) && (native & NativeViewportRestore) &&
+           (native & NativeKeyboardObserver) && (gate & GateVisibility);
 }
 }  // namespace compatibility
 
@@ -896,6 +898,8 @@ struct Identity {
     DWORD age = 0, imageSize = 0, timestamp = 0;
     bool operator==(const Identity&) const = default;
 };
+constexpr Identity magnify9949{{0xc5,0x46,0x12,0xd6,0x1f,0x4c,0x82,0xa8,
+    0x21,0x05,0xd4,0x0b,0xd8,0xf3,0x63,0xde}, 1, 0x14c000, 0x88b3d475};
 struct Profile {
     Kind kind;
     Identity identity;
@@ -905,7 +909,7 @@ struct Profile {
 constexpr Profile profiles[] = {
     {Kind::Magnifier, {{0x99,0x46,0x73,0xd3,0xf7,0xad,0x69,0xbc,0x0b,0x62,0xa7,0xf4,0x56,0x60,0x23,0x4f},1,0x130000,0x5a1425a3}, {0x258ac,0x78108,0x77a7c,0x77b3c,0x547b0,0x52d3c,0x53330,0x1c2e8,0x2852c,0x52aa4,0x55a20,0x2a520}, 12},
     // Magnify.exe 10.0.26100.9949: matching Microsoft PDB, both static window procedures verified against GWLP_USERDATA.
-    {Kind::Magnifier, {{0xc5,0x46,0x12,0xd6,0x1f,0x4c,0x82,0xa8,0x21,0x05,0xd4,0x0b,0xd8,0xf3,0x63,0xde},1,0x14c000,0x88b3d475}, {0x2605c,0x7bdf8,0x7b76c,0x7b82c,0x57750,0x55d48,0x56360,0x1bae8,0x29498,0x55ac4,0x58b20,0x2b460}, 12},
+    {Kind::Magnifier, magnify9949, {0x2605c,0x7bdf8,0x7b76c,0x7b82c,0x57750,0x55d48,0x56360,0x1bae8,0x29498,0x55ac4,0x58b20,0x2b460}, 12},
     {Kind::Shell, {{0xda,0xf3,0x07,0x95,0x7f,0xd4,0x02,0x5f,0x65,0x69,0xfc,0x50,0x27,0x3c,0x40,0xd7},1,0x9a5000,0xbc86bb4d}, {0x16bec0,0x16c2c0,0x16bde0,0x4d5ee0,0x2198b0,0x216860}, 6},
     {Kind::Desktop, {{0x27,0x6f,0x66,0x1d,0x2f,0xba,0x88,0x85,0x58,0x88,0xd3,0xe2,0xb9,0x4b,0x0f,0xd8},1,0x344000,0xbee7e13f}, {0x2839dc}, 1},
     // KB5132061. Matching Microsoft public PDBs establish the shell entry points and desktop int.
@@ -1413,6 +1417,7 @@ public:
     };
     enum class Update : WPARAM { Transform, Display, Device };
     enum class Color : std::uint8_t { Red, Blue, Yellow };
+    using ReadMonitorTransform = BOOL(WINAPI*)(HMONITOR, double*, int*, int*);
     struct Appearance {
         bool hidden = false;
         Color color = Color::Red;
@@ -1440,6 +1445,20 @@ private:
     using ReadTransform = BOOL(WINAPI*)(float*, int*, int*);
     static constexpr wchar_t kClassName[] = L"BetterMagnifier.ZoomBorder";
 
+    struct Projection {
+        pinch::View view;
+        bool monitorLocal;
+        bool operator==(const Projection& other) const {
+            return view.zoom == other.view.zoom && view.x == other.view.x && view.y == other.view.y &&
+                   monitorLocal == other.monitorLocal;
+        }
+    };
+    struct Monitor {
+        HMONITOR handle;
+        RECT bounds;
+        std::optional<pinch::View> sampled;
+        std::optional<Projection> projection;
+    };
     struct Strip {
         D2D_MATRIX_3X2_F transform;
         Microsoft::WRL::ComPtr<IDCompositionVisual> visual;
@@ -1471,9 +1490,8 @@ private:
     RECT desktop_{};
     std::shared_ptr<Graphics> graphics_;
     std::vector<Strip> strips_;
-    std::vector<RECT> monitors_;
+    std::vector<Monitor> monitors_;
     std::vector<D2D_MATRIX_3X2_F> frame_;
-    std::optional<pinch::View> lastView_;
     bool registered_ = false;
     bool displayPosted_ = false, devicePosted_ = false;
     bool active_ = false;
@@ -1519,9 +1537,46 @@ private:
         MONITORINFO info{};
         info.cbSize = sizeof(info);
         if (!GetMonitorInfoW(monitor, &info)) return FALSE;
-        auto& bounds = *reinterpret_cast<std::vector<RECT>*>(data);
-        bounds.push_back(info.rcMonitor);
+        auto& monitors = *reinterpret_cast<std::vector<Monitor>*>(data);
+        monitors.push_back({monitor, info.rcMonitor, {}, {}});
         return TRUE;
+    }
+
+    static std::optional<pinch::View> validatedView(double scale, int x, int y) {
+        if (!std::isfinite(scale) || scale < 1 || scale > 16) return std::nullopt;
+        if (scale == 1) return pinch::View{};
+        if (x < -262144 || x > 262144 || y < -262144 || y > 262144) return std::nullopt;
+        return pinch::View{scale, x, y};
+    }
+
+    bool sampleViews(ReadTransform read, ReadMonitorTransform readMonitor, bool expectsMonitorZoom) {
+        std::optional<pinch::View> legacy;
+        float scale = 1;
+        int x = 0, y = 0;
+        if (read && read(&scale, &x, &y)) legacy = validatedView(scale, x, y);
+        const bool spansDisplays = legacy && legacy->zoom > 1;
+        bool independent = expectsMonitorZoom;
+        for (auto& monitor : monitors_) {
+            monitor.sampled.reset();
+            if (!spansDisplays && readMonitor) {
+                double factor = 1;
+                int offsetX = 0, offsetY = 0;
+                if (readMonitor(monitor.handle, &factor, &offsetX, &offsetY))
+                    monitor.sampled = validatedView(factor, offsetX, offsetY);
+                if (monitor.sampled && monitor.sampled->zoom > 1) independent = true;
+            }
+        }
+        bool changed = false;
+        for (auto& monitor : monitors_) {
+            std::optional<Projection> next;
+            if (monitor.sampled) next = Projection{*monitor.sampled, true};
+            else if (legacy && (spansDisplays || !independent)) next = Projection{*legacy, false};
+            if (next != monitor.projection) {
+                monitor.projection = next;
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     void clearOverlay() {
@@ -1658,7 +1713,6 @@ private:
         desktop_ = {};
         monitors_.clear();
         frame_.clear();
-        lastView_.reset();
     }
 
     void failed() {
@@ -1671,15 +1725,36 @@ private:
 public:
     static constexpr UINT_PTR kTimer = 0x4b5a;
 
-    static std::array<Edge, 4> edges(const RECT& monitor, pinch::View view = {}) {
+    static ReadMonitorTransform resolveMonitorTransform() {
+        // Windows 11 25H2 .9974. Microsoft symbols and the Magnification.dll
+        // caller verify the private getter's amd64 signature on this image.
+        constexpr binary_profiles::Identity identity{{
+            0x73, 0x42, 0xa9, 0x8a, 0xf6, 0x08, 0x65, 0xa3, 0xe0, 0xa1, 0x03, 0x63, 0xd9, 0x9d, 0xf8, 0x15},
+            1, 0x1de000, 0x1bfb6b85};
+        constexpr DWORD rva = 0x8b9c0;
+        const auto user = GetModuleHandleW(L"user32.dll");
+        if (!user || binary_profiles::identify(user) != identity) return nullptr;
+        const auto entry = GetProcAddress(user, "GetMagnificationDesktopMonitorMagnification");
+        if (reinterpret_cast<ULONG_PTR>(entry) != reinterpret_cast<ULONG_PTR>(user) + rva ||
+            !binary_profiles::permitted(user, rva, false)) return nullptr;
+        return reinterpret_cast<ReadMonitorTransform>(entry);
+    }
+
+    static std::array<Edge, 4> edges(const RECT& monitor, pinch::View view = {}, bool monitorLocal = false) {
         constexpr LONG thickness = 5;
+        // Independent zoom offsets are measured within the source monitor.
+        // The legacy transform instead uses the primary desktop origin.
+        const double originX = monitorLocal ? monitor.left : 0;
+        const double originY = monitorLocal ? monitor.top : 0;
+        const auto sourceX = [&](LONG x) { return originX + view.x + (x - originX) / view.zoom; };
+        const auto sourceY = [&](LONG y) { return originY + view.y + (y - originY) / view.zoom; };
         const auto makeEdge = [&](const RECT& pixels) -> Edge {
-            const double x = pixels.left / view.zoom, y = pixels.top / view.zoom;
+            const double x = sourceX(pixels.left), y = sourceY(pixels.top);
             const double left = std::floor(x), top = std::floor(y);
             Edge edge;
-            edge.bounds = {static_cast<LONG>(left) + view.x, static_cast<LONG>(top) + view.y,
-                           static_cast<LONG>(std::ceil(pixels.right / view.zoom)) + view.x,
-                           static_cast<LONG>(std::ceil(pixels.bottom / view.zoom)) + view.y};
+            edge.bounds = {static_cast<LONG>(left), static_cast<LONG>(top),
+                           static_cast<LONG>(std::ceil(sourceX(pixels.right))),
+                           static_cast<LONG>(std::ceil(sourceY(pixels.bottom)))};
             edge.transform._11 = static_cast<float>((pixels.right - pixels.left) / view.zoom);
             edge.transform._22 = static_cast<float>((pixels.bottom - pixels.top) / view.zoom);
             edge.transform._31 = static_cast<float>(x - left);
@@ -1705,7 +1780,8 @@ public:
         target_ = target;
         topologyMessage_ = topologyMessage;
     }
-    void refresh(bool active, ReadTransform read, Update update = Update::Transform, Color color = Color::Red) {
+    void refresh(bool active, ReadTransform read, Update update = Update::Transform, Color color = Color::Red,
+                 ReadMonitorTransform readMonitor = nullptr, bool expectsMonitorZoom = false) {
         if (update == Update::Display) displayPosted_ = false;
         if (update == Update::Device) devicePosted_ = false;
         if (!target_ || updating_) return;
@@ -1748,35 +1824,33 @@ public:
             }
             if (!target_) return;
         }
-        float scale = 1;
-        int x = 0, y = 0;
-        if (!read || !read(&scale, &x, &y) || !target_ || !std::isfinite(scale) || scale < 1 || scale > 16) return;
-        if (lastView_ && scale == lastView_->zoom && x == lastView_->x && y == lastView_->y) return;
-        const PerMonitorDpi dpi;
-        if (!dpi) { failed(); return; }
         if (monitors_.empty()) {
-            if (!EnumDisplayMonitors(nullptr, nullptr, addMonitor, reinterpret_cast<LPARAM>(&monitors_)) || monitors_.empty()) {
+            const PerMonitorDpi dpi;
+            if (!dpi || !EnumDisplayMonitors(nullptr, nullptr, addMonitor, reinterpret_cast<LPARAM>(&monitors_)) ||
+                monitors_.empty()) {
                 failed();
                 return;
             }
-            desktop_ = monitors_.front();
-            for (const auto& monitor : monitors_) UnionRect(&desktop_, &desktop_, &monitor);
+            desktop_ = monitors_.front().bounds;
+            for (const auto& monitor : monitors_) UnionRect(&desktop_, &desktop_, &monitor.bounds);
         }
-        const pinch::View view{scale, x, y};
-        lastView_ = view;
+        if (!sampleViews(read, readMonitor, expectsMonitorZoom) || !target_) return;
         frame_.clear();
         for (const auto& monitor : monitors_) {
-            for (const auto& edge : edges(monitor, view)) {
+            if (!monitor.projection) continue; // Keep the frame off where the transform is unknown.
+            for (const auto& edge : edges(monitor.bounds, monitor.projection->view, monitor.projection->monitorLocal)) {
                 if (edge.bounds.left < edge.bounds.right && edge.bounds.top < edge.bounds.bottom)
                     frame_.push_back(positionOnOverlay(edge, desktop_));
             }
         }
-        if (frame_.empty()) { failed(); return; }
         if (frame_.size() == strips_.size()) {
             if (!move() && target_) failed();
         } else {
             clearOverlay();
-            if (target_ && !build(color) && target_) failed();
+            if (target_ && !frame_.empty()) {
+                const PerMonitorDpi dpi;
+                if ((!dpi || !build(color)) && target_) failed();
+            }
         }
     }
     void close() {
@@ -1956,6 +2030,8 @@ public:
             (state.requestSource == wheel && state.requestedSequence != state.appliedSequence)) {
             const auto visible = read();
             if (visible && std::isfinite(visible->zoom) && visible->zoom >= 1 && visible->zoom <= 16) {
+                // Per-monitor zoom can leave the global transform at 100%.
+                if ((state.nativeCaps & compatibility::NativeUiLevel) && visible->zoom == 1) return acknowledged;
                 // A composition sample can lag the accepted native target.
                 // Taking over an outward gesture must never request a decrease.
                 return enlarging ? std::max(acknowledged, visible->zoom) : visible->zoom;
@@ -3897,6 +3973,7 @@ MoveMouse originalMoveMouse = nullptr;
 decltype(&ClipCursor) originalClipCursor = nullptr;
 MoveTo moveTo = nullptr;
 ReadTransform readTransform = nullptr;
+runtime::ZoomBorder::ReadMonitorTransform readMonitorTransform = nullptr;
 std::atomic<bool> overviewSuspended{false};
 std::optional<pinch::View> overviewView;
 std::atomic<bool> keepPointerStable{true};
@@ -4087,6 +4164,7 @@ void installReadingHooks(HMODULE module) {
 bool symbolUnsupported = false;
 bool hooksAttempted = false;
 LONG capabilities = 0;
+bool useAuthoritativeUiLevel = false; // Exact native image with an independent per-monitor zoom lifecycle.
 std::atomic<bool> hiding{true};
 std::atomic<bool> visibilityPending{false};
 std::mutex stylesMutex;
@@ -4578,7 +4656,8 @@ bool keyboardHoldAvailable() {
     const auto* state = mapping.get();
     constexpr auto required = compatibility::NativeCore | compatibility::NativeKeyboardObserver |
                               compatibility::NativeViewportRestore | compatibility::NativeBootstrapWindows;
-    return state && !stopping.load() && state->controlEnabled && state->magnifierReady &&
+    return state && !(state->nativeCaps & compatibility::NativeUiLevel) &&
+        !stopping.load() && state->controlEnabled && state->magnifierReady &&
         state->keyboardHoldMultiplier > 1 && (static_cast<unsigned>(state->nativeCaps) & required) == required &&
         messageWindow && nativeSelf && nativeUi && readTransform && moveTo && originalChange && originalOption && setLevel &&
         rendererThread.load() == GetCurrentThreadId() && uiThread.load() == GetCurrentThreadId();
@@ -4925,8 +5004,10 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
             const auto appearance = borderAppearance.load();
             const auto update = message == kRefreshZoomBorder ? static_cast<runtime::ZoomBorder::Update>(w)
                                                              : runtime::ZoomBorder::Update::Transform;
+            const bool expectsMonitorZoom = state && (state->nativeCaps & compatibility::NativeUiLevel) &&
+                                            state->nativeLevel > 10000;
             zoomBorder.refresh(state && wantsZoomBorder(*state, GetTickCount64(), appearance.hidden),
-                               readTransform, update, appearance.color);
+                               readTransform, update, appearance.color, readMonitorTransform, expectsMonitorZoom);
         }
         return 0;
     }
@@ -5041,15 +5122,17 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
             const double cap = std::clamp(state->maxZoomPercent / 100.0, 1.0, 16.0);
             level = std::clamp(level, 1.0, cap);
             const bool hasRenderer = nativeSelf != nullptr;
-            if (hasRenderer && rendererThread.load() != GetCurrentThreadId()) {
+            if (!useAuthoritativeUiLevel && hasRenderer && rendererThread.load() != GetCurrentThreadId()) {
                 InterlockedExchange(&state->nativeError, ERROR_INVALID_THREAD_ID);
                 return 0;
             }
             const double previous = state->nativeLevel / 10000.0;
             const bool prime = level > 1 && (!hasRenderer || !trackingInitialized.load() || previous <= 1);
             const bool reset = level <= 1 && (previous > 1 || action == 3);
-            double delivered = level;
-            if (prime || reset || std::abs(level - previous) >= 0.00005) {
+            const long uiPercent = useAuthoritativeUiLevel
+                ? std::max(level > 1 ? 101L : 100L, (std::lround(level * 10000) + 50) / 100) : 0;
+            double delivered = useAuthoritativeUiLevel ? uiPercent / 100.0 : level;
+            if (prime || reset || std::abs(delivered - previous) >= 0.00005) {
                 struct Applying {
                     bool previous = applyingPinch;
                     bool previousTouchpad = applyingTouchpadPinch;
@@ -5062,7 +5145,23 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
                 if (applyingTouchpadPinch && originalClipCursor && holdPointer()) originalClipCursor(nullptr);
                 long percent = static_cast<long>(std::lround(level * 100));
                 if (prime) percent = std::max(101L, percent);
-                if (prime || reset) {
+                if (useAuthoritativeUiLevel) {
+                    // The verified native UI dispatches through the active
+                    // viewport and needs the previous option for its transition.
+                    const auto expectedUi = nativeUi.load();
+                    const auto expectedWindow = messageWindow.load();
+                    releaseManagedTarget(); // Let the UI finish its deferred renderer callbacks.
+                    InterlockedExchange(&state->startAtNormal, 0);
+                    if (reset) uiPrimeBlocked.store(false);
+                    setLevel(expectedUi, uiPercent);
+                    if (stopping.load() || nativeUi.load() != expectedUi || messageWindow.load() != expectedWindow ||
+                        (!action && !stillOwnsInput())) return 0;
+                    if (getOption(keeper, 14) != uiPercent) {
+                        InterlockedExchange(&state->nativeError, ERROR_RETRY);
+                        return 0; // The active UI did not accept this level.
+                    }
+                    trackingInitialized.store(delivered > 1 && nativeSelf);
+                } else if (prime || reset) {
                     // UI owns the first transition even when the fullscreen
                     // window/renderer has not yet been observed at cold 100%.
                     InterlockedExchange(&state->startAtNormal, 0);
@@ -5113,7 +5212,8 @@ LRESULT CALLBACK messages(HWND window, UINT message, WPARAM w, LPARAM l) {
             InterlockedExchange(&state->nativeError, 0);
             acknowledge();
             if (action) { InterlockedIncrement(&state->nativeCommands); InterlockedIncrement(&state->zoomRevision); InterlockedIncrement(&state->inputRevision); }
-            acceptManagedTarget(action == 3 ? bridge::InputSource::Reset : source, static_cast<float>(delivered));
+            if (!useAuthoritativeUiLevel)
+                acceptManagedTarget(action == 3 ? bridge::InputSource::Reset : source, static_cast<float>(delivered));
             refreshControlReady();
         }
         return 0;
@@ -5190,6 +5290,24 @@ HWND WINAPI create(DWORD ex, LPCWSTR name, LPCWSTR title, DWORD flags, int x, in
     return window;
 }
 
+void postNativeUpdate(bridge::Record& state, HWND target, LONG& last, LONG& lastCommand,
+                      decltype(&PostMessageW) post = PostMessageW) {
+    if (!target) return;
+    const LONG sequence = InterlockedCompareExchange(&state.requestedSequence, 0, 0);
+    const LONG command = InterlockedCompareExchange(&state.syncRequest, 0, 0);
+    if (sequence == last && command == lastCommand) return;
+
+    // The producer increments the sequence before clearing its write marker.
+    const bool writing = InterlockedCompareExchange(&state.requestWriting, 0, 0) != 0;
+    const bool pendingCommand = InterlockedCompareExchange(&state.pendingCommand, 0, 0) != 0;
+    if ((pendingCommand || (sequence != last && sequence && !writing)) && post(target, updateMessage, 0, 0)) {
+        if (!writing) last = sequence;
+        lastCommand = command;
+    } else if (sequence == last && !pendingCommand) {
+        lastCommand = command;
+    }
+}
+
 DWORD WINAPI worker(void* stopParameter) {
     const HANDLE localStop = static_cast<HANDLE>(stopParameter);
     LONG last = mapping.get()->appliedSequence, lastCommand = -1;
@@ -5202,8 +5320,6 @@ DWORD WINAPI worker(void* stopParameter) {
         auto* state = mapping.get();
         if (!state) continue;
         refreshNativeVisibility();
-        const LONG sequence = InterlockedCompareExchange(&state->requestedSequence, 0, 0);
-        const LONG command = InterlockedCompareExchange(&state->syncRequest, 0, 0);
         const HWND target = messageWindow.load();
         const bool border = wantsZoomBorder(*state, GetTickCount64(), borderAppearance.load().hidden);
         if (target && (lastBorderTarget != target || lastBorder != border) &&
@@ -5216,11 +5332,7 @@ DWORD WINAPI worker(void* stopParameter) {
             (state->shellApplied != state->shellRevision || shouldSuspend != overviewSuspended.load()))
             PostMessageW(target, updateMessage, 1, 0);
         // Coalesce pending HID updates; process them on Windows' own UI thread.
-        if (target && (sequence != last || command != lastCommand)) {
-            if (((sequence != last && sequence) || state->pendingCommand) && PostMessageW(target, updateMessage, 0, 0)) {
-                last = sequence; lastCommand = command;
-            } else if (sequence == last && !state->pendingCommand) { lastCommand = command; }
-        }
+        postNativeUpdate(*state, target, last, lastCommand);
     }
     return 0;
 }
@@ -5286,6 +5398,7 @@ bool initialize() {
     };
     void* targets[12]{};
     const bool profiled = binary_profiles::resolve(module, binary_profiles::Kind::Magnifier, targets, std::size(targets));
+    useAuthoritativeUiLevel = profiled && binary_profiles::identify(module) == binary_profiles::magnify9949;
     if (!profiled) {
         // Static WndProc names do not prove the window data layout.
         void* symbols[std::size(names)]{};
@@ -5307,6 +5420,10 @@ bool initialize() {
     if (!api) return unsupported();
     readTransform = reinterpret_cast<ReadTransform>(GetProcAddress(api, "MagGetFullscreenTransform"));
     if (!readTransform) return unsupported();
+    if (useAuthoritativeUiLevel) {
+        readMonitorTransform = runtime::ZoomBorder::resolveMonitorTransform();
+        if (!readMonitorTransform) Wh_Log(L"Per-monitor zoom border transform is unverified on this Windows image.");
+    }
     moveTo = reinterpret_cast<MoveTo>(targets[8]);
     getOption = reinterpret_cast<GetOption>(targets[2]);
     getKeeper = reinterpret_cast<GetKeeper>(targets[3]);
@@ -5343,7 +5460,7 @@ bool initialize() {
     }
     installReadingHooks(module);
     available = true;
-    capabilities = static_cast<LONG>(plan.capabilities);
+    capabilities = static_cast<LONG>(plan.capabilities | (useAuthoritativeUiLevel ? compatibility::NativeUiLevel : 0u));
     InterlockedExchange(&mapping.get()->nativeCaps, capabilities);
     InterlockedExchange(&mapping.get()->resolverReasonNative, ERROR_SUCCESS);
     InterlockedExchange(&mapping.get()->nativeError, ERROR_SUCCESS);

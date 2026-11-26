@@ -2,9 +2,11 @@
 
 ## 1.2.0 — 2026-11-26
 
-- Añade perfiles locales verificados de Magnify y Explorer para Windows 11 25H2, compilación 26200.9974. Se recuperan la aceleración de teclado y el control de lectura al señalar en ese binario.
+- Añade perfiles locales verificados de Magnify y Explorer para Windows 11 25H2, compilación 26200.9974. El pellizco y la rueda usan la ruta de la Lupa que ajusta el nivel del monitor activo.
 - Cuando falta un perfil local, el adaptador busca firmas exactas y aprovecha la caché de símbolos de Windhawk. La protección del puntero es un grupo opcional y el seguimiento nativo queda disponible si cambia la función.
 - El primer pellizco se conserva hasta que puede enviarse a la Lupa si su estado cambia durante el arranque.
+- La Lupa espera a que se termine de escribir cada objetivo antes de recibirlo. Restablecer al 100 % conserva la prioridad.
+- El marco usa la posición y la escala de cada monitor para conservar su grosor al ampliar el escritorio.
 - Windows vuelve a dibujar los menús emergentes. El tema opcional se aplica a diálogos y hojas de propiedades compatibles.
 
 ## 1.1.0 — 2026-11-26

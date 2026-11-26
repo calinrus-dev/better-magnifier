@@ -4,10 +4,15 @@ Fecha de revisión: 26 de noviembre de 2026.
 
 ## Estado de 1.2.0
 
-- Pasaron 1.034 comprobaciones automatizadas. El resolver de producción identificó las tres imágenes del equipo mapeadas sin ejecución, sin descargar símbolos.
+- Pasaron 1.091 comprobaciones automatizadas. El resolver de producción identificó las tres imágenes del equipo mapeadas sin ejecución, sin descargar símbolos.
 - Windows 11 25H2 26200.9974. La 1.1.0 arrancaba mediante símbolos y perdía la recuperación por procedimientos de ventana de Magnify y el perfil de lectura al señalar. [KB5132061 de Microsoft](https://support.microsoft.com/en-au/servicing/os/windows-11/2026/11/kb5132061-windows-11-24h2-25h2-26h2-security-update).
 - Se verificaron los perfiles actuales de Magnify, twinui.pcshell y Explorer con los PDB de Microsoft correspondientes. Las funciones se comprobaron en código ejecutable y el indicador de escritorio en datos escribibles. Se preservaron los perfiles anteriores.
+- La primera compilación actualizaba el nivel global, mientras Windows usaba el nivel del monitor. El perfil actual entrega el pellizco y la rueda al controlador nativo que aplica el nivel del monitor activo. El usuario confirmó ampliación visible con ambas entradas en 26200.9974.
 - Una prueba reproduce la pérdida del primer pellizco si cambia la revisión de la Lupa entre la lectura del estado y el envío. La corrección conserva la petición y la envía una sola vez tras sincronizar el estado.
+- Otra prueba reproduce la pérdida de una petición si Magnify recibe su número de secuencia antes de que termine la escritura. La entrega espera a que los datos estén completos. El restablecimiento explícito conserva prioridad.
+- La lectura por monitor midió 494 % con la lectura clásica al 100 %. El marco compensa la escala y el desplazamiento del monitor que lo contiene. Las pruebas de geometría proyectan los cuatro lados a cinco píxeles físicos con escalas distintas, desplazamiento de la vista y orígenes negativos.
+- Con la compilación final instalada, el usuario confirmó que el marco mantiene el grosor en los cuatro lados al aumentar el zoom y volver hacia el 100 %.
+- El relevo desde la rueda se prueba con un objetivo al 235 % y una lectura clásica al 100 %. El primer fotograma del pellizco conserva el objetivo y el siguiente reduce la ampliación gradualmente.
 - Las pruebas comprueban la degradación por grupos al faltar funciones opcionales, incluida la protección del puntero, y la compatibilidad con imágenes verificadas. Están separadas de la prueba de gestos con hardware físico.
 
 ## Estado de 1.1.0

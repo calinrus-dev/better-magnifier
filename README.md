@@ -32,7 +32,7 @@ El **acorde de clic izquierdo y derecho** tiene su propio ajuste. El marco puede
 - **Clic izquierdo y derecho a la vez.** Alterna el modo zoom del ratón y conserva el nivel de ampliación.
 - **Rueda principal.** Amplía o reduce mientras el modo está activo. Al llegar al 100 %, el modo queda listo para ampliar de nuevo. **Win + rueda** también permite usar el zoom.
 - **Clic de rueda.** Restablece el 100 % y mantiene preparado el modo. **Rueda lateral.** Desplaza en vertical con el modo activo.
-- **Win + «+» / «−».** Funciona también en el teclado numérico. Una pulsación aplica el paso nativo. Al mantenerla, el zoom acelera gradualmente.
+- **Win + «+» / «−».** Funciona también en el teclado numérico. Una pulsación aplica el paso nativo. La repetición gradual se aplica a los perfiles compatibles.
 - **Ctrl + Alt + Mayús + F9** pausa o reanuda el zoom. **Ctrl + Alt + Mayús + F10** restablece el 100 %. **Win + Esc** cierra la Lupa.
 
 El marco de cinco píxeles señala que el modo de zoom del ratón está activo y deja pasar los clics. El nivel de ampliación es global y se conserva al cambiar de ventana. Los gestos de dos y cuatro dedos conservan su comportamiento. El deslizamiento lateral de tres dedos puede cambiar de ventana directamente.

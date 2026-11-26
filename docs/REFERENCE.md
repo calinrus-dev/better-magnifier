@@ -62,7 +62,7 @@ Los nombres de los ajustes coinciden con la pestaña **Ajustes** del mod.
 
 En **Configuración → Accesibilidad → Lupa → Vista** se ajusta el seguimiento del puntero, el foco del teclado, el cursor de texto y Narrador. En modo **Dentro de los bordes**, la vista se desplaza al acercar el puntero a un borde. En modo **Centrado**, se desplaza de forma continua cuando mueves el puntero.
 
-El marco de DirectComposition mantiene un grosor objetivo de cinco píxeles físicos en los cuatro lados. Solicita a Windows la exclusión de captura. El resultado depende del método de captura. En la prueba con OBS, **Captura de ventana** y **Captura de pantalla → Moderno (WGC)** compartieron el contenido sin la ampliación del escritorio. DXGI capturó la ampliación en ese equipo. La [validación](VALIDATION.md) identifica qué mediciones corresponden a versiones anteriores.
+El marco de DirectComposition compensa el zoom de cada monitor para conservar un grosor objetivo de cinco píxeles físicos en los cuatro lados. Solicita a Windows la exclusión de captura. En la prueba con OBS, **Captura de ventana** y **Captura de pantalla → Moderno (WGC)** compartieron el contenido sin la ampliación del escritorio. DXGI capturó la ampliación en ese equipo. La [validación](VALIDATION.md) identifica qué mediciones corresponden a versiones anteriores.
 
 ## Diagnóstico
 
@@ -72,7 +72,7 @@ Ejecuta este comando desde la carpeta del paquete x64.
 .\build\pinch-zoom-host.exe --status
 ```
 
-Comprueba que figuran **Native gate: READY** y **Windows Magnifier: READY**. `actualZoom` muestra el nivel renderizado. `--reset` solicita el 100 %. Los valores de resolución `1` y `2` indican el perfil local verificado y la resolución por símbolos, respectivamente.
+Comprueba que figuran **Native gate: READY** y **Windows Magnifier: READY**. `actualZoom` muestra el nivel que comunica la Lupa. `--reset` solicita el 100 %. Los valores de resolución `1` y `2` indican el perfil local verificado y la resolución por símbolos, respectivamente.
 
 Para observar los informes HID y contar gestos durante 30 segundos, usa `.\build\pinch-zoom-host.exe --diagnose --seconds 30` con el host de Windhawk desactivado. El diagnóstico cuenta informes sin almacenar coordenadas de los dedos.
 
@@ -87,6 +87,8 @@ La medición predeterminada muestrea cinco segundos de CPU y memoria de los proc
 El lector HID y el filtro de gestos se ejecutan en Explorer. El complemento de Magnify se comunica con ese controlador para aplicar objetivos sobre la Lupa en pantalla completa. La integración nativa de zoom en Windows 11 x64 usa perfiles locales para las imágenes de las compilaciones 26200.9711 y 26200.9974 con Windhawk 1.7.3. Para el pellizco se requiere un Precision Touchpad con contactos HID. El tema oscuro tiene su propia comprobación de compatibilidad. Los modos lente y acoplado y el escritorio seguro de UAC quedan fuera del alcance. Consulta la [validación](VALIDATION.md) para combinaciones pendientes, como DPI mixtos y distintos monitores.
 
 Cada perfil local verifica el GUID y la edad CodeView, el tamaño, el timestamp PE y las secciones de destino. La identidad del binario decide si puede usarse ese perfil. Cuando falta un perfil en la compilación 26200, se buscan firmas exactas por medio de la caché de Windhawk y de los PDB de Microsoft. La validación de direcciones se aplica antes de activar cada grupo de funciones.
+
+En 26200.9974, la Lupa aplica los niveles del monitor activo en pasos de un punto porcentual. El mod acumula la entrada de la rueda y del pellizco antes de entregar esos niveles. Mantener Win + «+» o «−» usa la repetición nativa de Windows. Vista de tareas sigue el comportamiento de Windows en este perfil.
 
 Si Windows cambia una función opcional, el motor conserva las funciones cuyos grupos completos siguen disponibles. Por ejemplo, sin la protección de puntero verificada se usa el seguimiento nativo. Si falta el filtro del shell, el touchpad conserva sus gestos normales y el teclado y la rueda pueden seguir ampliando si el motor está disponible. Si falta el núcleo, se usan la Lupa visible y sus atajos estándar.
 

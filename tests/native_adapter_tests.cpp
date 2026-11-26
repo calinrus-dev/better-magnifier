@@ -22,9 +22,18 @@ bool nativeReadDefault(const void* self) { ++nativeReadDefaultCalls; readingObje
 int uiCalls = 0, directWrites = 0, persistedWrites = 0, cursorWarps = 0;
 bool simulateReentrantClose = false;
 bool deferUiRenderer = false;
+bool rejectUiLevel = false;
+long previousUiPercent = 0;
 unsigned primeResumes = 0;
 BOOL WINAPI recordPrimeResume(HWND window, UINT message, WPARAM w, LPARAM l) {
     if (window == magnifier::messageWindow.load() && message == magnifier::updateMessage && !w && !l) ++primeResumes;
+    return TRUE;
+}
+unsigned workerUpdates = 0;
+BOOL WINAPI dispatchWorkerUpdate(HWND window, UINT message, WPARAM w, LPARAM l) {
+    if (window != magnifier::messageWindow.load() || message != magnifier::updateMessage || w || l) return FALSE;
+    ++workerUpdates;
+    magnifier::messages(window, message, w, l);
     return TRUE;
 }
 LRESULT closeResult = 0;
@@ -58,6 +67,8 @@ void cache(void*, int name, long value, bool save) {
 }
 void apply(void* self, long value) {
     ++uiCalls;
+    previousUiPercent = percent;
+    if (rejectUiLevel) return;
     if (!deferUiRenderer) {
         visibleView.zoom = value / 100.0;
         if (!captureRendererFromUi) magnifier::rendererGeneration.fetch_add(1);
@@ -179,19 +190,23 @@ int wmain() {
                 "the three choices give the expected vivid opaque colors");
     }
     {
-        const auto checkFrame = [&](const RECT& screen, pinch::View view) {
+        const auto checkFrame = [&](const RECT& screen, pinch::View view, bool monitorLocal = false) {
             const auto [left, top, right, bottom] = screen;
+            const double originX = monitorLocal ? left : 0;
+            const double originY = monitorLocal ? top : 0;
+            const auto displayX = [&](double source) { return originX + (source - originX - view.x) * view.zoom; };
+            const auto displayY = [&](double source) { return originY + (source - originY - view.y) * view.zoom; };
             const std::array<RECT, 4> pixels{{
                 {left, top, right, top + 5}, {left, bottom - 5, right, bottom},
                 {left, top + 5, left + 5, bottom - 5}, {right - 5, top + 5, right, bottom - 5}}};
-            const auto edges = runtime::ZoomBorder::edges(screen, view);
+            const auto edges = runtime::ZoomBorder::edges(screen, view, monitorLocal);
             constexpr RECT desktop{-1920, -320, 2560, 1440};
             for (std::size_t i = 0; i < edges.size(); ++i) {
                 const auto& edge = edges[i];
                 const auto& area = pixels[i];
                 const auto& matrix = edge.transform;
-                const double x = (edge.bounds.left - view.x + static_cast<double>(matrix._31)) * view.zoom;
-                const double y = (edge.bounds.top - view.y + static_cast<double>(matrix._32)) * view.zoom;
+                const double x = displayX(edge.bounds.left + static_cast<double>(matrix._31));
+                const double y = displayY(edge.bounds.top + static_cast<double>(matrix._32));
                 constexpr double epsilon = 0.001;
                 require(std::abs(x - area.left) < epsilon && std::abs(y - area.top) < epsilon &&
                         std::abs(x + matrix._11 * view.zoom - area.right) < epsilon &&
@@ -202,8 +217,8 @@ int wmain() {
                         matrix._32 + matrix._22 <= edge.bounds.bottom - edge.bounds.top + epsilon,
                         "the native strip keeps the entire fractional visual in its client bounds");
                 const auto fixed = runtime::ZoomBorder::positionOnOverlay(edge, desktop);
-                const double fixedX = (desktop.left - view.x + static_cast<double>(fixed._31)) * view.zoom;
-                const double fixedY = (desktop.top - view.y + static_cast<double>(fixed._32)) * view.zoom;
+                const double fixedX = displayX(desktop.left + static_cast<double>(fixed._31));
+                const double fixedY = displayY(desktop.top + static_cast<double>(fixed._32));
                 require(std::abs(fixedX - area.left) < 0.005 && std::abs(fixedY - area.top) < 0.005 &&
                         fixed._11 == matrix._11 && fixed._22 == matrix._22,
                         "a fixed virtual-desktop surface makes pan and scale independent of HWND movement");
@@ -215,6 +230,10 @@ int wmain() {
             checkFrame(primary, {scale, 426, 241});
             checkFrame(secondary, {scale, -351, -74});
         }
+        checkFrame(primary, {4.94, 426, 241}, true);
+        checkFrame(secondary, {1.8, 93, 37}, true);
+        checkFrame(secondary, {16.0, 53, 12}, true);
+        checkFrame(secondary, {}, true);
     }
     magnifier::mapping.useTestRecord(&state);
     magnifier::messageWindow.store(reinterpret_cast<HWND>(0x5678));
@@ -568,9 +587,38 @@ int wmain() {
         currentMode = 2; percent = 100; visibleView = {1, 0, 0};
         captureRendererFromUi = false; simulateReentrantClose = false;
         deferUiRenderer = false;
+        rejectUiLevel = false;
         uiCalls = directWrites = persistedWrites = nullRendererWrites = 0;
         lastFloat = 1;
     };
+    prepareCold();
+    magnifier::useAuthoritativeUiLevel = true;
+    state.nativeCaps = compatibility::NativeCore | compatibility::NativeKeyboardObserver |
+                       compatibility::NativeViewportRestore | compatibility::NativeBootstrapWindows |
+                       compatibility::NativeUiLevel;
+    state.gateCaps = compatibility::GateVisibility;
+    state.keyboardHoldMultiplier = 2;
+    captureRendererFromUi = true;
+    deliver(10050, 691);
+    require(previousUiPercent == 100 && percent == 101 && directWrites == 1 && persistedWrites == 0 &&
+            state.requestedLevel == 10050 && state.nativeLevel == 10100 && state.appliedSequence == 691,
+            "the authoritative UI primes from its original option and confirms its own integer level");
+    require(!magnifier::keyboardHoldAvailable() && !magnifier::overviewAvailable(),
+            "the authoritative UI preserves stock keyboard repeat and overview instead of driving the renderer directly");
+    deferUiRenderer = true;
+    deliver(14050, 692, bridge::InputSource::Wheel);
+    deliver(11542, 693, bridge::InputSource::Wheel);
+    require(previousUiPercent == 141 && percent == 115 && uiCalls == 3 && directWrites == 1 &&
+            state.requestedLevel == 11542 && state.nativeLevel == 11500 && state.appliedSequence == 693,
+            "wheel reversals use the stock UI with the exact latest mailbox goal intact");
+    magnifier::change(reinterpret_cast<void*>(0x2000), 1.15f, nullptr);
+    require(directWrites == 2 && std::abs(visibleView.zoom - 1.15) < 0.00001 && state.appliedSequence == 693,
+            "the authoritative UI can finish a deferred native renderer callback");
+    rejectUiLevel = true;
+    deliver(16000, 694);
+    require(state.appliedSequence == 693 && state.nativeLevel == 11500 && state.nativeError == ERROR_RETRY,
+            "an authoritative UI request is not confirmed if the active view ignores it");
+    magnifier::useAuthoritativeUiLevel = false;
     prepareCold();
     state.nativeCaps = compatibility::NativeCore | compatibility::NativeKeyboardObserver;
     magnifier::nativeSelf.store(reinterpret_cast<void*>(0x2000));
@@ -1033,10 +1081,17 @@ int wmain() {
         deliver(23000, 903);
         require(state.appliedSequence == 902 && state.nativeLevel == 21500,
                 "the native reader never consumes partially published request fields");
+        LONG last = 902, lastCommand = state.syncRequest;
+        const auto postWorkerUpdate = [&] {
+            magnifier::postNativeUpdate(state, magnifier::messageWindow.load(), last, lastCommand, dispatchWorkerUpdate);
+        };
+        postWorkerUpdate();
+        require(workerUpdates == 0 && last == 902,
+                "the worker does not mark a sequence as posted while its fields are still being written");
         state.requestWriting = 0;
-        magnifier::messages(nullptr, magnifier::updateMessage, 0, 0);
-        require(state.appliedSequence == 903 && state.nativeLevel == 23000,
-                "the committed request is delivered when its producer finishes publishing it");
+        postWorkerUpdate(); postWorkerUpdate();
+        require(workerUpdates == 1 && last == 903 && state.appliedSequence == 903 && state.nativeLevel == 23000,
+                "the next worker wake delivers the committed request exactly once");
         state.down = 0; // The previous pinch ends.
         state.down = 1; // A new pinch takes the next input epoch.
         InterlockedIncrement(&state.inputRevision);
@@ -1048,6 +1103,16 @@ int wmain() {
         require(state.appliedSequence == 904 && state.nativeLevel == 10000 &&
                 state.currentSource == static_cast<LONG>(bridge::InputSource::PinchWheel),
                 "native recognizer ownership acknowledges a wheel-driven floor without discarding its origin");
+        last = 904;
+        state.requestWriting = 1;
+        state.requestedSequence = 905;
+        state.pendingCommand = 3;
+        InterlockedIncrement(&state.syncRequest);
+        postWorkerUpdate();
+        require(workerUpdates == 2 && state.pendingCommand == 0 && last == 904 && lastCommand == state.syncRequest &&
+                state.currentSource == static_cast<LONG>(bridge::InputSource::Reset),
+                "a synchronized reset keeps its priority without marking an unfinished level as posted");
+        state.requestWriting = 0;
     }
     std::cout << checks << " native adapter checks passed; fake backend; desktop unchanged\n";
 }
